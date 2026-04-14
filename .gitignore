@@ -1,9 +1,4 @@
 .env
 __pycache__/
 *.pyc
-data/
-models/
-rag/
-analysis/
-pipeline/
-main.py
+data/downloads/
