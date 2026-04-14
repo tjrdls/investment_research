@@ -1,0 +1,9 @@
+yfinance
+pandas
+numpy
+ta
+torch
+chromadb
+openai
+dart-fss
+python-dotenv
