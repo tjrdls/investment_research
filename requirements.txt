@@ -1,9 +1,15 @@
 yfinance
 pandas
 numpy
-ta
+ta-lib
 torch
 chromadb
 openai
 dart-fss
 python-dotenv
+pykrx
+requests
+tqdm
+scikit-learn
+matplotlib
+newsapi

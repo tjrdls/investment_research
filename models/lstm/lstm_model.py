@@ -1,101 +1,349 @@
-# 역할: 기술적 지표와 주가 데이터를 입력으로 받아 LSTM 모델을 사용하여 분석용 feature를 출력하는 모듈.
-# 단기 상승/하락 예측 대신, LLM에 전달할 수 있는 feature 벡터를 생성한다.
+# -*- coding: utf-8 -*-
+"""
+역할: LSTM과 텍스트 임베딩을 결합한 멀티모달 모델.
+기술적 지표 시퀀스와 DART 재무 정보 임베딩을 함께 사용하여 
+상승/하락/횡보를 3분류 예측한다.
+"""
 
 import torch
 import torch.nn as nn
 import pandas as pd
 import numpy as np
+from sklearn.preprocessing import StandardScaler
+from torch.utils.data import Dataset, DataLoader
 from openai import OpenAI
 import os
 from dotenv import load_dotenv
 
 load_dotenv()
 
-class LSTMModel(nn.Module):
-    def __init__(self, input_size, hidden_size, num_layers, output_size=32):  # output_size 변경
-        super(LSTMModel, self).__init__()
-        self.hidden_size = hidden_size
-        self.num_layers = num_layers
-        self.lstm = nn.LSTM(input_size, hidden_size, num_layers, batch_first=True)
-        # 분석 feature 출력으로 변경
-        self.fc = nn.Sequential(
-            nn.Linear(hidden_size, 128),
-            nn.ReLU(),
-            nn.Linear(128, output_size)  # 32차원 feature
+openai_client = OpenAI(api_key=os.getenv("OPENAI_API_KEY", ""))
+
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+
+class MultimodalStockPredictor(nn.Module):
+    """
+    멀티모달 주식 예측 모델
+    
+    LSTM Branch: 기술적 지표 시퀀스 (seq_len × num_features)
+                → LSTM 레이어 → hidden state
+    
+    Text Branch: DART 재무 정보 임베딩 (1536-d)
+               → Dense layers → 64-d feature
+    
+    Fusion: LSTM output + Text feature concat
+          → Dense layers → [상승, 하락, 횡보] 3분류
+    """
+    
+    def __init__(self, num_feat=11, hidden=128, text_in=1536, proj=64,
+                 n_cls=3, n_layers=2, dropout=0.3):
+        super(MultimodalStockPredictor, self).__init__()
+        
+        # LSTM Branch
+        self.lstm = nn.LSTM(
+            input_size=num_feat,
+            hidden_size=hidden,
+            num_layers=n_layers,
+            batch_first=True,
+            dropout=dropout if n_layers > 1 else 0.0
         )
+        self.lstm_drop = nn.Dropout(dropout)
+        
+        # Text Branch (1536-d → 512 → 256 → 64)
+        self.text_proj = nn.Sequential(
+            nn.Linear(text_in, 512),
+            nn.LayerNorm(512),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(512, 256),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(256, proj),
+            nn.GELU()
+        )
+        
+        # Fusion & Output (128 + 64 → 128 → 64 → 3)
+        self.fusion = nn.Sequential(
+            nn.Linear(hidden + proj, 128),
+            nn.LayerNorm(128),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(128, 64),
+            nn.GELU(),
+            nn.Dropout(dropout * 0.5),
+            nn.Linear(64, n_cls)
+        )
+        
+        # 가중치 초기화
+        self._init_weights()
+    
+    def _init_weights(self):
+        """Xavier initialization"""
+        for name, p in self.named_parameters():
+            if "weight" in name and p.dim() > 1:
+                nn.init.xavier_uniform_(p)
+            elif "bias" in name:
+                nn.init.zeros_(p)
+    
+    def forward(self, x_seq, x_text):
+        """
+        :param x_seq: (batch, seq_len, num_feat)
+        :param x_text: (batch, 1536)
+        :return: (batch, 3) logits
+        """
+        # LSTM Branch
+        out, _ = self.lstm(x_seq)
+        lstm_f = self.lstm_drop(out[:, -1, :])  # 마지막 타임스텝 (batch, hidden)
+        
+        # Text Branch
+        text_f = self.text_proj(x_text)  # (batch, 64)
+        
+        # Fusion
+        fused = torch.cat([lstm_f, text_f], dim=1)  # (batch, 128+64)
+        return self.fusion(fused)
 
-    def forward(self, x):
-        h0 = torch.zeros(self.num_layers, x.size(0), self.hidden_size).to(x.device)
-        c0 = torch.zeros(self.num_layers, x.size(0), self.hidden_size).to(x.device)
-        out, _ = self.lstm(x, (h0, c0))
-        out = self.fc(out[:, -1, :])
-        return out
 
-def predict_with_lstm(indicators_df):
-    """
-    LSTM으로 분석 feature를 생성.
-    :param indicators_df: DataFrame with indicators
-    :return: feature vector
-    """
-    print("   🤖 LSTM 모델 분석 중...")
-    # 간단한 모델 로드 (실제로는 학습된 모델 필요)
-    model = LSTMModel(input_size=10, hidden_size=50, num_layers=2, output_size=32)
-    # 더미 feature
-    feature = np.random.randn(32).astype(np.float32)
-    print("   ✅ 분석 완료")
-    return feature
+class StockDataset(Dataset):
+    """PyTorch Dataset for stock prediction"""
+    
+    def __init__(self, seqs, texts, labels):
+        self.seqs = torch.from_numpy(seqs)
+        self.texts = torch.from_numpy(texts)
+        self.labels = torch.from_numpy(labels)
+    
+    def __len__(self):
+        return len(self.labels)
+    
+    def __getitem__(self, idx):
+        return self.seqs[idx], self.texts[idx], self.labels[idx]
 
-# LLM 입력용 feature 생성
-def build_llm_input(lstm_output, indicators):
+
+def prepare_dataset(price_data, text_embeddings, seq_len=20, pred_days=5, threshold=0.02):
     """
-    LSTM 출력과 기술적 지표를 LLM 입력용으로 조합.
-    :param lstm_output: LSTM feature vector
-    :param indicators: DataFrame with indicators
-    :return: dict for LLM
+    학습용 데이터셋 준비
+    
+    :param price_data: dict {ticker: DataFrame with indicators}
+    :param text_embeddings: dict {ticker: np.array (1536-d)}
+    :param seq_len: LSTM input sequence length
+    :param pred_days: 예측 기간 (거래일)
+    :param threshold: 상승/하락 임계값
+    :return: (X_seq, X_txt, Y, scalers)
     """
+    
+    feature_cols = [
+        "open", "high", "low", "close", "volume",
+        "sma_20", "rsi", "bb_pct_b", "macd", "macd_hist", "volatility"
+    ]
+    
+    X_seq, X_txt, Y = [], [], []
+    scalers = {}
+    
+    for ticker, df in price_data.items():
+        if ticker not in text_embeddings or len(df) < seq_len + pred_days:
+            continue
+        
+        # 컬럼 확인 및 추출
+        available_cols = [c for c in feature_cols if c in df.columns]
+        if not available_cols:
+            continue
+        
+        feat = df[available_cols].values.astype(np.float32)
+        close = df["close"].values.astype(np.float32)
+        emb = text_embeddings[ticker]
+        
+        # Normalization
+        scaler = StandardScaler().fit(feat)
+        scalers[ticker] = scaler
+        feat_scaled = scaler.transform(feat)
+        
+        # Label 생성 (상승/하락/횡보)
+        labels = []
+        for i in range(len(close) - pred_days):
+            ret = (close[i + pred_days] - close[i]) / (close[i] + 1e-8)
+            if ret > threshold:
+                labels.append(0)  # 상승
+            elif ret < -threshold:
+                labels.append(1)  # 하락
+            else:
+                labels.append(2)  # 횡보
+        
+        labels = np.array(labels, dtype=np.int64)
+        
+        # Sequence 생성
+        for i in range(seq_len, len(feat_scaled) - pred_days):
+            label_idx = i - seq_len
+            if label_idx >= len(labels):
+                break
+            
+            X_seq.append(feat_scaled[i - seq_len : i])
+            X_txt.append(emb)
+            Y.append(labels[label_idx])
+    
+    if not X_seq:
+        raise ValueError("No valid data sequences generated")
+    
+    return (
+        np.array(X_seq, dtype=np.float32),
+        np.array(X_txt, dtype=np.float32),
+        np.array(Y, dtype=np.int64),
+        scalers
+    )
+
+
+def train_model(train_loader, val_loader, epochs=100, lr=0.001, patience=20):
+    """
+    모델 학습
+    
+    :param train_loader: DataLoader
+    :param val_loader: DataLoader
+    :param epochs: 에포크 수
+    :param lr: 학습률
+    :param patience: Early stopping patience
+    :return: (trained_model, history)
+    """
+    
+    model = MultimodalStockPredictor().to(DEVICE)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-4)
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+        optimizer, T_max=epochs, eta_min=1e-5
+    )
+    
+    criterion = nn.CrossEntropyLoss()
+    
+    history = {"tr_loss": [], "val_loss": [], "tr_acc": [], "val_acc": []}
+    es_counter = 0
+    best_val = 0.0
+    best_state = None
+    
+    print("   🤖 모델 학습 시작 ({} epochs)...".format(epochs))
+    
+    for ep in range(1, epochs + 1):
+        # Training
+        model.train()
+        tr_loss, tr_correct, tr_total = 0.0, 0, 0
+        
+        for seq, txt, lbl in train_loader:
+            seq, txt, lbl = seq.to(DEVICE), txt.to(DEVICE), lbl.to(DEVICE)
+            
+            optimizer.zero_grad()
+            logit = model(seq, txt)
+            loss = criterion(logit, lbl)
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            optimizer.step()
+            
+            tr_loss += loss.item()
+            tr_correct += (logit.argmax(1) == lbl).sum().item()
+            tr_total += len(lbl)
+        
+        tr_loss = tr_loss / max(len(train_loader), 1)
+        tr_acc = tr_correct / max(tr_total, 1)
+        
+        # Validation
+        model.eval()
+        val_loss, val_correct, val_total = 0.0, 0, 0
+        
+        with torch.no_grad():
+            for seq, txt, lbl in val_loader:
+                seq, txt, lbl = seq.to(DEVICE), txt.to(DEVICE), lbl.to(DEVICE)
+                logit = model(seq, txt)
+                loss = criterion(logit, lbl)
+                
+                val_loss += loss.item()
+                val_correct += (logit.argmax(1) == lbl).sum().item()
+                val_total += len(lbl)
+        
+        val_loss = val_loss / max(len(val_loader), 1)
+        val_acc = val_correct / max(val_total, 1)
+        
+        history["tr_loss"].append(tr_loss)
+        history["val_loss"].append(val_loss)
+        history["tr_acc"].append(tr_acc)
+        history["val_acc"].append(val_acc)
+        
+        scheduler.step()
+        
+        # Early stopping
+        if val_acc > best_val:
+            best_val = val_acc
+            best_state = model.state_dict()
+            es_counter = 0
+        else:
+            es_counter += 1
+        
+        if (ep % 10 == 0 or es_counter >= patience) and ep > 1:
+            print("    Epoch {:3d}: tr_loss={:.4f} tr_acc={:.3f} | val_loss={:.4f} val_acc={:.3f}".format(
+                ep, tr_loss, tr_acc, val_loss, val_acc
+            ))
+        
+        if es_counter >= patience:
+            print("    Early stopping at epoch {}".format(ep))
+            break
+    
+    # Load best model
+    if best_state:
+        model.load_state_dict(best_state)
+    
+    return model, history
+
+
+def predict_next_trend(model, indicators_df, text_embedding, seq_len=20, scalers=None, stock_code=None):
+    """
+    다음 추세 예측
+    
+    :param model: trained model
+    :param indicators_df: DataFrame with technical indicators
+    :param text_embedding: np.array (1536-d)
+    :param seq_len: sequence length
+    :param scalers: dict of scalers {ticker: scaler}
+    :param stock_code: stock code for scaler lookup
+    :return: dict with prediction results
+    """
+    
+    if len(indicators_df) < seq_len:
+        return {"prediction": "데이터 부족", "probabilities": {}}
+    
+    feature_cols = [
+        "open", "high", "low", "close", "volume",
+        "sma_20", "rsi", "bb_pct_b", "macd", "macd_hist", "volatility"
+    ]
+    
+    available_cols = [c for c in feature_cols if c in indicators_df.columns]
+    feat = indicators_df[available_cols].values.astype(np.float32)
+    
+    # 정규화
+    if scalers and stock_code and stock_code in scalers:
+        scaler = scalers[stock_code]
+    else:
+        scaler = StandardScaler().fit(feat)
+    
+    feat_scaled = scaler.transform(feat)
+    
+    # 최근 시퀀스
+    x_seq = torch.FloatTensor(feat_scaled[-seq_len:]).unsqueeze(0).to(DEVICE)
+    x_text = torch.FloatTensor(text_embedding).unsqueeze(0).to(DEVICE)
+    
+    model.eval()
+    with torch.no_grad():
+        logits = model(x_seq, x_text)
+        probs = torch.softmax(logits, dim=1).cpu().numpy()[0]
+    
+    class_names = ["📈 상승", "📉 하락", "➡️  횡보"]
+    pred_class = int(np.argmax(probs))
+    
     return {
-        "lstm_signal": lstm_output.tolist(),
-        "rsi": indicators["rsi"].iloc[-1] if not indicators.empty else 0,
-        "macd": indicators["macd"].iloc[-1] if not indicators.empty else 0,
-        "trend": "상승" if indicators["close"].iloc[-1] > indicators["close"].iloc[-2] else "하락"
+        "prediction": class_names[pred_class],
+        "probabilities": {
+            "상승": float(probs[0]),
+            "하락": float(probs[1]),
+            "횡보": float(probs[2])
+        },
+        "confidence": float(probs[pred_class])
     }
 
-# LLM 추론 단계
-def llm_analysis(data):
-    """
-    LLM으로 최종 분석 수행.
-    :param data: dict from build_llm_input
-    :return: analysis text
-    """
-    openai_client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-
-    prompt = f"""
-다음 주식 분석 데이터를 기반으로 분석하세요:
-
-LSTM 신호: {data['lstm_signal']}
-RSI: {data['rsi']}
-MACD: {data['macd']}
-추세: {data['trend']}
-
-분석:
-1. 현재 추세
-2. 위험 요인
-3. 상승 가능성
-"""
-
-    response = openai_client.chat.completions.create(
-        model="gpt-3.5-turbo",
-        messages=[{"role": "user", "content": prompt}],
-        max_tokens=500
-    )
-    return response.choices[0].message.content
 
 if __name__ == "__main__":
-    # 테스트
-    result = predict_with_lstm(pd.DataFrame())
-    print("LSTM Feature:", result)
-    indicators = pd.DataFrame({'rsi': [70], 'macd': [0.5], 'close': [100, 101]})
-    llm_input = build_llm_input(result, indicators)
-    print("LLM Input:", llm_input)
-    analysis = llm_analysis(llm_input)
+    print("LSTM 모듈 로드 완료")
+
     print("LLM Analysis:", analysis)
