@@ -323,7 +323,19 @@ def predict_next_trend(model, indicators_df, text_embedding, seq_len=20, scalers
     # 최근 시퀀스
     x_seq = torch.FloatTensor(feat_scaled[-seq_len:]).unsqueeze(0).to(DEVICE)
     x_text = torch.FloatTensor(text_embedding).unsqueeze(0).to(DEVICE)
-    
+
+    if model is None:
+        print("    [경고] 모델 미설정: 기본 예측을 사용합니다.")
+        return {
+            "prediction": "모델 없음",
+            "probabilities": {
+                "상승": 0.33,
+                "하락": 0.33,
+                "횡보": 0.34
+            },
+            "confidence": 0.33
+        }
+
     model.eval()
     with torch.no_grad():
         logits = model(x_seq, x_text)

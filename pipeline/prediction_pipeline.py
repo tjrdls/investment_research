@@ -9,6 +9,7 @@ import os
 import time
 import pickle
 import numpy as np
+import torch
 from datetime import datetime
 
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
@@ -18,7 +19,7 @@ from data.financial.financial_collector import collect_financial_data, get_corp_
 from analysis.indicators.technical_indicators import calculate_indicators, get_technical_signals
 from analysis.news_analyzer import collect_stock_news, collect_macro_news, analyze_news_with_gpt
 from analysis.valuation_analyzer import calculate_ttm_metrics, get_industry_valuation_from_gpt
-from models.lstm.lstm_model import prepare_dataset, predict_next_trend
+from models.lstm.lstm_model import prepare_dataset, predict_next_trend, MultimodalStockPredictor
 from models.llm.llm_analyzer import analyze_with_llm, format_final_report
 from openai import OpenAI
 from dotenv import load_dotenv
@@ -52,6 +53,29 @@ def get_text_embedding(text):
         print("    ⚠️  Embedding 실패: {}".format(str(e)))
         # 폴백: 랜덤 벡터
         return np.random.randn(1536).astype(np.float32)
+
+
+def load_lstm_model():
+    """
+    훈련된 LSTM 모델 로드
+    
+    :return: 모델 객체 또는 None
+    """
+    if not os.path.exists(MODEL_PATH):
+        print("    ⚠️  모델 파일 없음: {}".format(MODEL_PATH))
+        print("    💡 학습하려면: python train_lstm.py")
+        return None
+    
+    try:
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        model = MultimodalStockPredictor().to(device)
+        model.load_state_dict(torch.load(MODEL_PATH, map_location=device))
+        model.eval()
+        print("    ✅ LSTM 모델 로드 완료")
+        return model
+    except Exception as e:
+        print("    ❌ 모델 로드 실패: {}".format(str(e)))
+        return None
 
 
 def build_context_text(stock_name, financial_df):
@@ -158,8 +182,9 @@ def run_single_stock_analysis(stock_code, stock_name):
         # 5. LSTM 예측
         print("\n  [5/6] LSTM 예측...")
         try:
+            lstm_model = load_lstm_model()
             lstm_pred = predict_next_trend(
-                None,  # 모델 없이 진행 가능
+                lstm_model,
                 indicators_df,
                 text_emb,
                 seq_len=SEQ_LEN

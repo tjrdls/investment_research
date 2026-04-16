@@ -27,9 +27,22 @@ def analyze_with_llm(stock_name, lstm_result, tech_signals, news_analysis, valua
     :return: 최종 의견 string
     """
     
-    print("   🧠 LLM 최종 분석 중...")
+    print("   [LLM] 최종 분석 중...")
     
-    tech_signals_text, tech_warnings_text, tech_score = tech_signals
+    if isinstance(tech_signals, dict):
+        tech_signals_text = tech_signals.get("signals", [])
+        tech_warnings_text = tech_signals.get("warnings", [])
+        tech_score = tech_signals.get("score", 0)
+    else:
+        try:
+            tech_signals_text, tech_warnings_text, tech_score = tech_signals
+        except Exception:
+            tech_signals_text, tech_warnings_text, tech_score = [], [], 0
+    
+    if tech_signals_text is None:
+        tech_signals_text = []
+    if tech_warnings_text is None:
+        tech_warnings_text = []
     
     signals_str = "\n".join(tech_signals_text) if tech_signals_text else "신호 없음"
     warnings_str = "\n".join(tech_warnings_text) if tech_warnings_text else "경고 없음"
