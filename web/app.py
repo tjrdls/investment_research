@@ -1,11 +1,16 @@
 # -*- coding: utf-8 -*-
+import sys
+import os
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 import streamlit as st
 import pandas as pd
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
+import time
 
 from pipeline.prediction_pipeline import run_analysis
-from data.price.data_collector import collect_price_data, get_top_stocks
+from data_loader.price.data_collector import collect_price_data, get_top_stocks
 from analysis.indicators.technical_indicators import calculate_indicators
 from analysis.news_analyzer import collect_stock_news, collect_macro_news
 
@@ -21,6 +26,15 @@ PERIOD_OPTIONS = {
     "1년": "1y",
     "6개월": "6m",
 }
+
+# 분석 진행 상태
+ANALYSIS_STAGES = [
+    ("데이터 수집", "💾"),
+    ("기술 분석", "📊"),
+    ("재무 분석", "💰"),
+    ("뉴스 수집", "📰"),
+    ("AI 분석", "🤖"),
+]
 
 
 def format_value(value, digits=2, suffix=""):
@@ -339,21 +353,10 @@ def render_news_tab(stock_name: str, result: dict, stock_news: list, macro_news:
 def main():
     st.set_page_config(page_title="투자 분석 웹 대시보드", layout="wide")
 
-    st.title("AI 투자 분석 대시보드")
-    st.write("Streamlit 기반 종목 분석 UI입니다. 사이드바에서 종목과 기간을 선택한 뒤 분석을 시작하세요.")
+    st.title("📈 AI 투자 분석 플랫폼")
+    st.markdown("종목을 선택하고 분석을 시작하면 데이터 흐름에 따라 결과가 표시됩니다.")
 
-    sidebar = st.sidebar
-    sidebar.header("분석 설정")
-
-    stock_options = get_stock_options()
-    stock_labels = [f"{code} {name}" for code, name in stock_options]
-    selected_option = sidebar.selectbox("종목 선택", stock_labels, index=0)
-    selected_code, selected_name = selected_option.split(" ", 1)
-
-    selected_period_label = sidebar.selectbox("기간 선택", list(PERIOD_OPTIONS.keys()), index=0)
-    selected_period = PERIOD_OPTIONS[selected_period_label]
-    start_analysis = sidebar.button("분석 시작")
-
+    # ==================== 세션 상태 초기화 (먼저 실행) ====================
     if "analysis_result" not in st.session_state:
         st.session_state.analysis_result = None
         st.session_state.price_df = None
@@ -361,42 +364,171 @@ def main():
         st.session_state.stock_news = None
         st.session_state.macro_news = None
         st.session_state.analysis_stock = None
+        st.session_state.analysis_stages = {stage[0]: False for stage in ANALYSIS_STAGES}
+        st.session_state.lstm_mode = "default"
+        st.session_state.gpt_model = "gpt-5.4-nano"
 
-    if start_analysis or st.session_state.analysis_stock != selected_code:
-        with st.spinner("분석을 수행 중입니다. 잠시만 기다려주세요..."):
-            result = run_analysis(selected_code)
-            st.session_state.analysis_result = result
+    # ==================== 사이드바 설정 ====================
+    sidebar = st.sidebar
+    sidebar.header("⚙️ 분석 설정")
+
+    stock_options = get_stock_options()
+    stock_labels = [f"{code} {name}" for code, name in stock_options]
+    selected_option = sidebar.selectbox("📌 종목 선택", stock_labels, index=0)
+    selected_code, selected_name = selected_option.split(" ", 1)
+
+    selected_period_label = sidebar.selectbox("📅 분석 기간", list(PERIOD_OPTIONS.keys()), index=0)
+    selected_period = PERIOD_OPTIONS[selected_period_label]
+
+    # LSTM 모델 설정 섹션
+    sidebar.markdown("---")
+    sidebar.markdown("### 🧠 LSTM 모델")
+    lstm_options = sidebar.radio("모델 선택", ["기본 제공 (빠름)", "커스텀 학습 (정확)"], index=0)
+    use_custom_lstm = lstm_options == "커스텀 학습 (정확)"
+    
+    if use_custom_lstm:
+        st.session_state.lstm_mode = "custom"
+        sidebar.info("💡 커스텀 모델을 사용합니다. (시간이 더 소요될 수 있습니다)")
+    else:
+        st.session_state.lstm_mode = "default"
+
+    # GPT 모델 설정 섹션
+    sidebar.markdown("---")
+    sidebar.markdown("### 🤖 AI 모델 (GPT)")
+    gpt_models = ["gpt-5.4-nano", "gpt-4-turbo", "gpt-4", "gpt-3.5-turbo"]
+    selected_gpt_model = sidebar.selectbox("모델 선택", gpt_models, index=0)
+    st.session_state.gpt_model = selected_gpt_model
+    sidebar.caption(f"선택된 모델: {selected_gpt_model}")
+
+    # 분석 시작 버튼
+    start_analysis = sidebar.button("🚀 분석 시작", use_container_width=True, type="primary")
+
+    # ==================== 분석 실행 ====================
+    if start_analysis and st.session_state.analysis_stock != selected_code:
+        st.session_state.analysis_stock = selected_code
+        
+        # 진행 상황 해더 및 플레이스홀더
+        progress_container = st.container(border=True)
+        progress_header = progress_container.empty()
+        progress_bars = {stage[0]: progress_container.empty() for stage in ANALYSIS_STAGES}
+        
+        with progress_container:
+            st.markdown("### 📊 분석 진행 상황")
+            col1, col2 = st.columns(2)
+            with col1:
+                st.caption(f"🧠 LSTM: {st.session_state.lstm_mode}")
+            with col2:
+                st.caption(f"🤖 GPT: {st.session_state.gpt_model}")
+        
+        # 분석 수행
+        try:
+            # 1. 데이터 수집
+            with progress_bars[ANALYSIS_STAGES[0][0]]:
+                st.progress(0.2)
+                st.text("데이터를 수집 중입니다...")
+            
             st.session_state.price_df = load_price_data(selected_code, selected_period)
             st.session_state.indicators_df = calculate_indicators(st.session_state.price_df)
+            st.session_state.analysis_stages[ANALYSIS_STAGES[0][0]] = True
+            progress_bars[ANALYSIS_STAGES[0][0]].success("✅ " + ANALYSIS_STAGES[0][0] + " 완료")
+            
+            # 2-4. 분석 수행
+            with progress_bars[ANALYSIS_STAGES[1][0]]:
+                st.progress(0.4)
+                st.text("AI 분석을 수행 중입니다...")
+            
+            # 전체 분석 실행
+            st.session_state.analysis_result = run_analysis(selected_code)
+            
+            for i in range(1, 4):
+                st.session_state.analysis_stages[ANALYSIS_STAGES[i][0]] = True
+                progress_bars[ANALYSIS_STAGES[i][0]].success("✅ " + ANALYSIS_STAGES[i][0] + " 완료")
+            
+            # 5. 뉴스 수집
+            with progress_bars[ANALYSIS_STAGES[4][0]]:
+                st.progress(0.9)
+                st.text("AI 분석을 완료했습니다...")
+            
             st.session_state.stock_news, st.session_state.macro_news = load_news(selected_name)
-            st.session_state.analysis_stock = selected_code
+            st.session_state.analysis_stages[ANALYSIS_STAGES[4][0]] = True
+            progress_bars[ANALYSIS_STAGES[4][0]].success("✅ " + ANALYSIS_STAGES[4][0] + " 완료")
+            
+            # 완료 메시지
+            st.balloons()
+            st.success("✨ 분석이 완료되었습니다! 아래에서 결과를 확인하세요.")
+            
+        except Exception as e:
+            st.error(f"❌ 분석 중 오류가 발생했습니다: {str(e)}")
+            return
 
+    # ==================== 분석 결과 표시 ====================
     result = st.session_state.analysis_result
+    
+    # 분석 중 상태 확인
+    if st.session_state.analysis_stock is not None and st.session_state.analysis_result is None:
+        st.info("🔄 분석을 수행 중입니다. 잠시만 기다려주세요...")
+        st.stop()
+    
     if result is None:
-        st.info("사이드바에서 종목을 선택하고 '분석 시작' 버튼을 눌러 분석을 시작하세요.")
+        st.info("👈 왼쪽 사이드바에서 종목을 선택하고 '분석 시작' 버튼을 눌러주세요.")
         return
 
-    tabs = st.tabs(["종합 분석", "차트", "기술 분석", "재무 분석", "뉴스"])
-    with tabs[0]:
+    st.markdown("---")
+    st.markdown(f"## 📊 {selected_name} ({selected_code}) 분석 결과")
+    st.markdown("---")
+
+    # ==================== 종합 분석 ====================
+    with st.expander("🎯 **종합 분석 요약**", expanded=True):
         render_summary_tab(selected_name, result)
 
-    with tabs[1]:
+    # ==================== 차트 분석 ====================
+    with st.expander("📈 **가격 차트 및 거래량**", expanded=True):
         if st.session_state.price_df is not None and not st.session_state.price_df.empty:
             render_chart_tab(st.session_state.price_df, st.session_state.indicators_df)
         else:
-            st.warning("차트에 필요한 가격 데이터를 불러오지 못했습니다.")
+            st.warning("⚠️ 차트 데이터를 불러올 수 없습니다.")
 
-    with tabs[2]:
+    # ==================== 기술 분석 ====================
+    with st.expander("📊 **기술 분석**", expanded=False):
         if st.session_state.indicators_df is not None and not st.session_state.indicators_df.empty:
             render_technical_tab(result, st.session_state.indicators_df)
         else:
-            st.warning("기술 분석 데이터를 불러오지 못했습니다.")
+            st.warning("⚠️ 기술 분석 데이터를 불러올 수 없습니다.")
 
-    with tabs[3]:
+    # ==================== 재무 분석 ====================
+    with st.expander("💰 **재무 분석**", expanded=False):
         render_finance_tab(result)
 
-    with tabs[4]:
+    # ==================== 뉴스 분석 ====================
+    with st.expander("📰 **뉴스 및 시장 분석**", expanded=False):
         render_news_tab(selected_name, result, st.session_state.stock_news or [], st.session_state.macro_news or [])
+
+    # ==================== LSTM 예측 결과 ====================
+    lstm_pred = result.get("lstm_prediction", {}) or {}
+    if lstm_pred:
+        st.markdown("---")
+        with st.expander("🤖 **LSTM 모델 예측**", expanded=False):
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.metric(
+                    "상승 확률",
+                    f"{int(lstm_pred.get('probabilities', {}).get('상승', 0))}%",
+                    delta=f"신뢰도: {int(lstm_pred.get('confidence', 0))}%"
+                )
+            with col2:
+                st.metric(
+                    "하락 확률",
+                    f"{int(lstm_pred.get('probabilities', {}).get('하락', 0))}%"
+                )
+            with col3:
+                st.metric(
+                    "횡보 확률",
+                    f"{int(lstm_pred.get('probabilities', {}).get('횡보', 0))}%"
+                )
+            
+            if lstm_pred.get("prediction"):
+                st.info(f"**모델 예측:** {lstm_pred.get('prediction')}")
+
 
 
 if __name__ == "__main__":
