@@ -14,8 +14,8 @@ from datetime import datetime
 
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 
-from data.price.data_collector import collect_price_data, get_top_stocks
-from data.financial.financial_collector import collect_financial_data, get_corp_code_map
+from data_loader.price.data_collector import collect_price_data, get_top_stocks
+from data_loader.financial.financial_collector import collect_financial_data, get_corp_code_map
 from analysis.indicators.technical_indicators import calculate_indicators, get_technical_signals
 from analysis.news_analyzer import collect_stock_news, collect_macro_news, analyze_news_with_gpt
 from analysis.valuation_analyzer import calculate_ttm_metrics, get_industry_valuation_from_gpt
