@@ -15,8 +15,8 @@ from datetime import datetime, timedelta
 project_root = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
 sys.path.insert(0, project_root)
 
-from data.price.data_collector import collect_price_data
-from data.financial.financial_collector import collect_financial_data, get_corp_code_map
+from data_loader.price.data_collector import collect_price_data
+from data_loader.financial.financial_collector import collect_financial_data, get_corp_code_map
 from analysis.indicators.technical_indicators import calculate_indicators
 from models.lstm.lstm_model import (
     MultimodalStockPredictor,
