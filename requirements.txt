@@ -13,3 +13,5 @@ tqdm
 scikit-learn
 matplotlib
 newsapi
+streamlit
+plotly
