@@ -24,8 +24,10 @@ def render_summary_tab(stock_name: str, result: dict):
         st.metric("투자 의견", final_analysis.get("recommendation", "N/A"))
         st.metric("신뢰도", f"{final_analysis.get('confidence', 'N/A')}%")
     with col2:
-        st.metric("상승 확률", f"{int(lstm_pred.get('probabilities', {}).get('상승', 0))}%")
-        st.metric("하락 확률", f"{int(lstm_pred.get('probabilities', {}).get('하락', 0))}%")
+        prob_up = lstm_pred.get('probabilities', {}).get('상승', 0) * 100
+        prob_down = lstm_pred.get('probabilities', {}).get('하락', 0) * 100
+        st.metric("상승 확률", f"{prob_up:.2f}%")
+        st.metric("하락 확률", f"{prob_down:.2f}%")
 
     st.markdown("#### LLM 요약")
     st.write(final_analysis.get("summary", "분석 결과 없음"))
@@ -74,20 +76,24 @@ def render_lstm_tab(result: dict):
     if lstm_pred:
         col1, col2, col3 = st.columns(3)
         with col1:
+            prob_up = lstm_pred.get('probabilities', {}).get('상승', 0) * 100
+            confidence = lstm_pred.get('confidence', 0) * 100
             st.metric(
                 "상승 확률",
-                f"{int(lstm_pred.get('probabilities', {}).get('상승', 0))}%",
-                delta=f"신뢰도: {int(lstm_pred.get('confidence', 0))}%"
+                f"{prob_up:.2f}%",
+                delta=f"신뢰도: {confidence:.1f}%"
             )
         with col2:
+            prob_down = lstm_pred.get('probabilities', {}).get('하락', 0) * 100
             st.metric(
                 "하락 확률",
-                f"{int(lstm_pred.get('probabilities', {}).get('하락', 0))}%"
+                f"{prob_down:.2f}%"
             )
         with col3:
+            prob_side = lstm_pred.get('probabilities', {}).get('횡보', 0) * 100
             st.metric(
                 "횡보 확률",
-                f"{int(lstm_pred.get('probabilities', {}).get('횡보', 0))}%"
+                f"{prob_side:.2f}%"
             )
 
         if lstm_pred.get("prediction"):

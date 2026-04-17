@@ -43,7 +43,20 @@ def run_single_stage_analysis(stage_name: str, selected_code: str, selected_peri
             
         elif stage_name == "기술 분석":
             # 이미 데이터 수집 시 함께 수행됨
-            pass
+            # technical 데이터를 analysis_result에 저장
+            if st.session_state.indicators_df is not None and not st.session_state.indicators_df.empty:
+                from analysis.indicators.technical_indicators import get_technical_signals
+                tech_signals, tech_warnings, tech_score = get_technical_signals(st.session_state.indicators_df)
+                if st.session_state.analysis_result is None:
+                    st.session_state.analysis_result = {}
+                st.session_state.analysis_result["technical"] = {
+                    "signals": tech_signals,
+                    "warnings": tech_warnings,
+                    "score": tech_score
+                }
+                print(f"기술 분석 데이터 저장: signals={len(tech_signals)}, warnings={len(tech_warnings)}, score={tech_score}")
+            else:
+                print(f"기술 분석 실패: indicators_df is None or empty")
             
         elif stage_name == "재무 분석":
             from pipeline.prediction_pipeline import run_financial_analysis

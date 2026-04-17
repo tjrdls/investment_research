@@ -96,18 +96,19 @@ def calculate_indicators(price_data):
         print("   ❌ 'close' 컬럼이 없습니다")
         return df
     
-    # 이동평균
-    df["sma_5"] = df["close"].rolling(window=5).mean()
-    df["sma_20"] = df["close"].rolling(window=20).mean()
-    df["sma_50"] = df["close"].rolling(window=50).mean()
-    df["sma_200"] = df["close"].rolling(window=200).mean()
+    # 이동평균 (데이터 길이에 맞게 조정)
+    min_periods = min(5, len(df))
+    df["sma_5"] = df["close"].rolling(window=min(5, len(df)), min_periods=min_periods).mean()
+    df["sma_20"] = df["close"].rolling(window=min(20, len(df)), min_periods=min_periods).mean()
+    df["sma_50"] = df["close"].rolling(window=min(50, len(df)), min_periods=min_periods).mean()
+    df["sma_200"] = df["close"].rolling(window=min(200, len(df)), min_periods=min_periods).mean()
     
     # 지수이동평균
-    df["ema_12"] = df["close"].ewm(span=12, adjust=False).mean()
-    df["ema_26"] = df["close"].ewm(span=26, adjust=False).mean()
+    df["ema_12"] = df["close"].ewm(span=min(12, len(df)), adjust=False).mean()
+    df["ema_26"] = df["close"].ewm(span=min(26, len(df)), adjust=False).mean()
     
     # RSI
-    df["rsi"] = compute_rsi(df["close"], period=14)
+    df["rsi"] = compute_rsi(df["close"], period=min(14, len(df)-1))
     
     # MACD
     df["macd"], df["macd_signal"], df["macd_hist"] = compute_macd(df["close"])
@@ -119,14 +120,14 @@ def calculate_indicators(price_data):
     df["ichi_tenkan"], df["ichi_kijun"], df["ichi_span_a"], df["ichi_span_b"] = compute_ichimoku(df)
     
     # 변동성 (5일 표준편차)
-    df["volatility"] = df["close"].pct_change().rolling(window=5).std()
+    df["volatility"] = df["close"].pct_change().rolling(window=min(5, len(df)), min_periods=1).std()
     
     # 거래량 이동평균
     if "volume" in df.columns:
-        df["volume_ma"] = df["volume"].rolling(window=20).mean()
+        df["volume_ma"] = df["volume"].rolling(window=min(20, len(df)), min_periods=1).mean()
     
-    # NaN 값 제거
-    df = df.dropna()
+    # NaN 값은 0으로 채우기 (dropna 대신)
+    df = df.fillna(0)
     
     print("   ✅ 지표 계산 완료 ({} 거래일)".format(len(df)))
     return df

@@ -417,39 +417,55 @@ def run_final_analysis(stock_code, stock_name, analysis_result):
     :return: 최종 분석 결과
     """
     try:
+        print("    🔄 AI 종합 분석 시작...")
+        
         # 필요한 데이터 추출
         lstm_pred = analysis_result.get("lstm_prediction", {})
-        tech_signals = analysis_result.get("technical", {}).get("signals", [])
+        tech_data = analysis_result.get("technical", {})
+        tech_signals = tech_data.get("signals", []) if isinstance(tech_data, dict) else []
         news_analysis = analysis_result.get("news", {}).get("analysis", {})
         valuation = analysis_result.get("valuation", {})
         
+        print(f"    데이터 확인 - LSTM: {bool(lstm_pred)}, 기술: {bool(tech_data)}, 뉴스: {bool(news_analysis)}, 밸류: {bool(valuation)}")
+        print(f"    LSTM 예측: {lstm_pred.get('prediction', 'N/A')}")
+        print(f"    기술 신호: {len(tech_signals) if tech_signals else 0}개")
+        print(f"    뉴스 분석: {news_analysis.get('verdict', 'N/A')}")
+        print(f"    밸류에이션: PER {valuation.get('PER', 'N/A')}")
+        print(f"    전체 analysis_result 키: {list(analysis_result.keys())}")
+        if "technical" in analysis_result:
+            print(f"    technical 데이터: {analysis_result['technical']}")
+        
         # 현재가 (price_df에서 가져오기)
         current_price = None
-        if "price_df" in globals() or hasattr(st.session_state, 'price_df'):
-            try:
-                # 세션 상태에서 가져오기 시도
-                import streamlit as st
-                if hasattr(st.session_state, 'price_df') and st.session_state.price_df is not None:
-                    current_price = st.session_state.price_df['close'].iloc[-1]
-            except:
-                pass
+        try:
+            import streamlit as st
+            if hasattr(st.session_state, 'price_df') and st.session_state.price_df is not None:
+                current_price = st.session_state.price_df['close'].iloc[-1]
+                print(f"    현재가: {current_price}")
+        except Exception as e:
+            print(f"    현재가 가져오기 실패: {e}")
         
         if current_price is None:
             current_price = 50000  # 기본값
+            print(f"    현재가: 기본값 사용 ({current_price})")
         
         # 최종 LLM 분석
+        print("    OpenAI API 호출 중...")
         final_analysis = analyze_with_llm(
             stock_name,
             lstm_pred,
-            tech_signals,
+            tech_data,
             news_analysis,
             valuation
         )
         
+        print(f"    분석 완료: {final_analysis.get('recommendation', 'N/A') if final_analysis else 'None'}")
         return final_analysis
         
     except Exception as e:
-        print("AI 종합 분석 실패: {}".format(str(e)))
+        print(f"    ❌ AI 종합 분석 실패: {str(e)}")
+        import traceback
+        traceback.print_exc()
         return {
             "recommendation": "분석 실패",
             "confidence": 0,
