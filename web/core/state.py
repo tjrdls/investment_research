@@ -17,9 +17,10 @@ ANALYSIS_STAGES = [
 
 # 탭 상태 정의
 TAB_STATUS = {
-    "waiting": {"emoji": "⏳", "color": "gray", "desc": "대기중"},
-    "running": {"emoji": "🔄", "color": "orange", "desc": "진행중"},
-    "completed": {"emoji": "✅", "color": "green", "desc": "완료"},
+    "waiting": {"emoji": "⏳", "color": "#999999", "desc": "대기중", "bg_color": "#f0f0f0"},
+    "running": {"emoji": "🔄", "color": "#ffa500", "desc": "진행중", "bg_color": "#fff8e1"},
+    "completed": {"emoji": "✅", "color": "#4caf50", "desc": "완료", "bg_color": "#e8f5e9"},
+    "error": {"emoji": "❌", "color": "#f44336", "desc": "오류", "bg_color": "#ffebee"},
 }
 
 DEFAULT_STOCKS = [

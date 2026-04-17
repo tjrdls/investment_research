@@ -22,7 +22,7 @@ from web.core.pipeline import AnalysisPipeline
 
 # UI 모듈
 from web.ui.sidebar import render_sidebar
-from web.ui.pipeline_view import render_pipeline_progress, update_progress, show_completion_message
+from web.ui.pipeline_view_new import render_pipeline_progress, update_progress, show_completion_message
 
 
 def main():
@@ -39,30 +39,19 @@ def main():
     selected_code, selected_name, selected_period, start_analysis = render_sidebar()
 
     # ==================== 분석 실행 ====================
-    # "모두 진행" 버튼 또는 "분석 시작" 버튼 처리
-    run_all = st.session_state.get("run_all_analysis", False)
-    
-    if (start_analysis or run_all) and st.session_state.analysis_stock != selected_code:
+    if start_analysis and st.session_state.analysis_stock != selected_code:
         st.session_state.analysis_stock = selected_code
-        st.session_state.analysis_in_progress = True
-        st.session_state.run_all_analysis = False
 
         try:
             # 파이프라인 실행
             pipeline = AnalysisPipeline()
-            
-            with st.spinner("분석을 수행 중입니다..."):
-                for stage_name, message in pipeline.run_pipeline(selected_code, selected_period):
-                    st.session_state.current_stage = stage_name
-                    update_progress(stage_name, message, message.startswith("✅"))
+            for stage_name, message in pipeline.run_pipeline(selected_code, selected_period):
+                update_progress(stage_name, message, message.startswith("✅"))
 
-            # 분석 완료
-            st.session_state.analysis_in_progress = False
+            # 완료 메시지
             show_completion_message()
-            st.rerun()
 
         except Exception as e:
-            st.session_state.analysis_in_progress = False
             st.error(f"❌ 분석 중 오류가 발생했습니다: {str(e)}")
             return
 
@@ -70,8 +59,8 @@ def main():
     result = st.session_state.analysis_result
 
     # 분석 중 상태 확인
-    if st.session_state.analysis_in_progress:
-        st.info(f"🔄 {st.session_state.get('current_stage', '분석')}을(를) 수행 중입니다. 잠시만 기다려주세요...")
+    if st.session_state.analysis_stock is not None and st.session_state.analysis_result is None:
+        st.info("🔄 분석을 수행 중입니다. 잠시만 기다려주세요...")
         st.stop()
 
     if result is None:
