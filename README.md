@@ -26,7 +26,7 @@ python main.py
 
 ### 웹 UI 실행
 ```bash
-streamlit run web/app.py
+streamlit run app.py
 ```
 
 ### 분석 모드
