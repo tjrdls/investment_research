@@ -343,6 +343,120 @@ def run_batch_analysis(top_n=5):
     return results
 
 
+def run_lstm_prediction(price_df, indicators_df, text_embedding=None):
+    """
+    LSTM 예측만 실행
+    
+    :param price_df: 가격 데이터 DataFrame
+    :param indicators_df: 기술 지표 DataFrame  
+    :param text_embedding: 텍스트 임베딩 (없으면 기본값 사용)
+    :return: LSTM 예측 결과
+    """
+    try:
+        # 모델 로드
+        lstm_model = load_lstm_model()
+        
+        # 텍스트 임베딩이 없으면 기본값 사용
+        if text_embedding is None:
+            text_emb = np.zeros(1536)  # 기본 임베딩
+        else:
+            text_emb = text_embedding
+            
+        # 예측 실행
+        lstm_pred = predict_next_trend(
+            lstm_model,
+            indicators_df,
+            text_emb,
+            seq_len=SEQ_LEN
+        )
+        
+        return lstm_pred
+        
+    except Exception as e:
+        print("LSTM 예측 실패: {}".format(str(e)))
+        return {
+            "prediction": "기술 오류",
+            "probabilities": {"상승": 0.33, "하락": 0.33, "횡보": 0.34},
+            "confidence": 0.0
+        }
+
+
+def run_financial_analysis(stock_code, financial_data, current_price):
+    """
+    재무 분석만 실행
+    
+    :param stock_code: 종목 코드
+    :param financial_data: 재무 데이터 (DataFrame)
+    :param current_price: 현재 주가
+    :return: 재무 분석 결과
+    """
+    try:
+        if financial_data is None or financial_data.empty:
+            return {}
+        
+        # 밸류에이션 분석
+        valuation_metrics = calculate_ttm_metrics(
+            financial_data.to_dict('records'),
+            current_price
+        )
+        
+        return valuation_metrics
+        
+    except Exception as e:
+        print("재무 분석 실패: {}".format(str(e)))
+        return {}
+
+
+def run_final_analysis(stock_code, stock_name, analysis_result):
+    """
+    최종 AI 종합 분석만 실행
+    
+    :param stock_code: 종목 코드
+    :param stock_name: 종목명
+    :param analysis_result: 기존 분석 결과
+    :return: 최종 분석 결과
+    """
+    try:
+        # 필요한 데이터 추출
+        lstm_pred = analysis_result.get("lstm_prediction", {})
+        tech_signals = analysis_result.get("technical", {}).get("signals", [])
+        news_analysis = analysis_result.get("news", {}).get("analysis", {})
+        valuation = analysis_result.get("valuation", {})
+        
+        # 현재가 (price_df에서 가져오기)
+        current_price = None
+        if "price_df" in globals() or hasattr(st.session_state, 'price_df'):
+            try:
+                # 세션 상태에서 가져오기 시도
+                import streamlit as st
+                if hasattr(st.session_state, 'price_df') and st.session_state.price_df is not None:
+                    current_price = st.session_state.price_df['close'].iloc[-1]
+            except:
+                pass
+        
+        if current_price is None:
+            current_price = 50000  # 기본값
+        
+        # 최종 LLM 분석
+        final_analysis = analyze_with_llm(
+            stock_name,
+            lstm_pred,
+            tech_signals,
+            news_analysis,
+            valuation
+        )
+        
+        return final_analysis
+        
+    except Exception as e:
+        print("AI 종합 분석 실패: {}".format(str(e)))
+        return {
+            "recommendation": "분석 실패",
+            "confidence": 0,
+            "summary": "기술적 오류로 분석을 완료할 수 없습니다."
+        }
+
+
 if __name__ == "__main__":
     # 테스트: 삼성전자
     result = run_analysis("005930")

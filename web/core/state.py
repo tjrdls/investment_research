@@ -9,10 +9,13 @@ import streamlit as st
 # 분석 진행 상태
 ANALYSIS_STAGES = [
     ("데이터 수집", "💾"),
+    ("재무 데이터 수집", "📈"),
     ("기술 분석", "📊"),
     ("재무 분석", "💰"),
     ("뉴스 수집", "📰"),
-    ("AI 분석", "🤖"),
+    ("뉴스 분석", "🔍"),
+    ("LSTM 예측", "🧠"),
+    ("AI 종합 분석", "🤖"),
 ]
 
 # 탭 상태 정의
@@ -44,6 +47,7 @@ def init_session_state():
         st.session_state.analysis_result = None
         st.session_state.price_df = None
         st.session_state.indicators_df = None
+        st.session_state.financial_data = None
         st.session_state.stock_news = None
         st.session_state.macro_news = None
         st.session_state.analysis_stock = None
@@ -54,6 +58,9 @@ def init_session_state():
         st.session_state.gpt_model = "gpt-5.4-nano"
         # 탭 상태 초기화
         st.session_state.tab_states = {stage[0]: "waiting" for stage in ANALYSIS_STAGES}
+        # UI 표시 여부
+        st.session_state.analysis_ready = False
+        st.session_state.active_tab = "데이터 수집"
 
 
 def get_analysis_stages():

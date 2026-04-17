@@ -79,8 +79,14 @@ def render_technical_tab(result: dict, indicators_df: pd.DataFrame):
     table = build_technical_summary(indicators_df)
     st.table(table)
 
-    signals = result.get("technical", {}).get("signals", []) or []
-    warnings = result.get("technical", {}).get("warnings", []) or []
+    # result가 None일 수 있으므로 안전하게 처리
+    if result is not None:
+        signals = result.get("technical", {}).get("signals", []) or []
+        warnings = result.get("technical", {}).get("warnings", []) or []
+    else:
+        signals = []
+        warnings = []
+    
     summary = pd.DataFrame(
         {
             "신호 유형": ["상승 신호", "하락 신호"],

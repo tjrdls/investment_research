@@ -10,6 +10,10 @@ from .technical import format_value
 
 def render_summary_tab(stock_name: str, result: dict):
     """종합 분석 탭 렌더링"""
+    if result is None:
+        st.warning("⚠️ 분석 결과가 없습니다.")
+        return
+        
     final_analysis = result.get("final_analysis", {}) or {}
     lstm_pred = result.get("lstm_prediction", {}) or {}
     news_analysis = result.get("news", {}).get("analysis", {}) or {}
@@ -62,6 +66,10 @@ def render_summary_tab(stock_name: str, result: dict):
 
 def render_lstm_tab(result: dict):
     """LSTM 예측 탭 렌더링"""
+    if result is None:
+        st.warning("⚠️ LSTM 예측 결과가 없습니다.")
+        return
+        
     lstm_pred = result.get("lstm_prediction", {}) or {}
     if lstm_pred:
         col1, col2, col3 = st.columns(3)

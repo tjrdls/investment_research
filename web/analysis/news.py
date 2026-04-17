@@ -27,6 +27,10 @@ def render_news_tab(stock_name: str, result: dict, stock_news: list, macro_news:
     st.markdown("---")
 
     st.markdown("#### 뉴스 분석 결과")
+    if result is None:
+        st.warning("⚠️ 뉴스 분석 결과가 없습니다.")
+        return
+        
     news_analysis = result.get("news", {}).get("analysis", {}) or {}
     st.write(f"- 뉴스 판정: {news_analysis.get('verdict', 'N/A')}")
     st.write(f"- 점수: {format_value(news_analysis.get('score'), digits=2)}")

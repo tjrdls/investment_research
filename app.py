@@ -17,12 +17,12 @@ except ImportError as e:
     st.stop()
 
 # 코어 모듈
-from web.core.state import init_session_state
+from web.core.state import init_session_state, get_analysis_stages
 from web.core.pipeline import AnalysisPipeline
 
 # UI 모듈
 from web.ui.sidebar import render_sidebar
-from web.ui.pipeline_view import render_pipeline_progress, update_progress, show_completion_message
+from web.ui.pipeline_view import render_pipeline_progress, update_progress
 
 
 def main():
@@ -38,58 +38,30 @@ def main():
     # ==================== 사이드바 ====================
     selected_code, selected_name, selected_period, start_analysis = render_sidebar()
 
-    # ==================== 분석 실행 ====================
-    # "모두 진행" 버튼 또는 "분석 시작" 버튼 처리
-    run_all = st.session_state.get("run_all_analysis", False)
-    
-    if (start_analysis or run_all) and st.session_state.analysis_stock != selected_code:
+    # ==================== 분석 UI 준비 ====================
+    # "분석 시작" 버튼을 누르면 UI만 표시 (실제 분석은 탭 클릭 시 진행)
+    if start_analysis and st.session_state.analysis_stock != selected_code:
         st.session_state.analysis_stock = selected_code
-        st.session_state.analysis_in_progress = True
-        st.session_state.run_all_analysis = False
-
-        try:
-            # 파이프라인 실행
-            pipeline = AnalysisPipeline()
-            
-            with st.spinner("분석을 수행 중입니다..."):
-                for stage_name, message in pipeline.run_pipeline(selected_code, selected_period):
-                    st.session_state.current_stage = stage_name
-                    update_progress(stage_name, message, message.startswith("✅"))
-
-            # 분석 완료
-            st.session_state.analysis_in_progress = False
-            show_completion_message()
-            st.rerun()
-
-        except Exception as e:
-            st.session_state.analysis_in_progress = False
-            st.error(f"❌ 분석 중 오류가 발생했습니다: {str(e)}")
-            return
+        st.session_state.analysis_ready = True
+        st.session_state.active_tab = "데이터 수집"
+        # 탭 상태를 모두 "waiting"으로 초기화
+        st.session_state.tab_states = {stage[0]: "waiting" for stage in get_analysis_stages()}
+        st.rerun()
 
     # ==================== 분석 결과 표시 ====================
-    result = st.session_state.analysis_result
-
-    # 분석 중 상태 확인
-    if st.session_state.analysis_in_progress:
-        st.info(f"🔄 {st.session_state.get('current_stage', '분석')}을(를) 수행 중입니다. 잠시만 기다려주세요...")
-        st.stop()
-
-    if result is None:
+    if not st.session_state.analysis_ready:
         st.info("👈 왼쪽 사이드바에서 종목을 선택하고 '분석 시작' 버튼을 눌러주세요.")
         return
 
     st.markdown("---")
-    st.markdown(f"## 📊 {selected_name} ({selected_code}) 분석 결과")
+    st.markdown(f"## 📊 {st.session_state.analysis_stock} 분석 준비")
     st.markdown("---")
 
-    # ==================== 탭 기반 분석 결과 ====================
+    # ==================== 탭 기반 분석 UI ====================
     render_pipeline_progress(
         selected_name,
-        result,
-        st.session_state.price_df,
-        st.session_state.indicators_df,
-        st.session_state.stock_news,
-        st.session_state.macro_news
+        selected_code,
+        selected_period
     )
 
 

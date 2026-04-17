@@ -38,7 +38,7 @@ def build_value_judgement(valuation: dict):
 def render_finance_tab(result: dict):
     """재무 분석 탭 렌더링"""
     st.markdown("#### 재무 분석")
-    valuation = result.get("valuation", {}) or {}
+    valuation = result.get("valuation", {}) if result else {}
     valuation_status, finance_status = build_value_judgement(valuation)
 
     metrics = pd.DataFrame(
