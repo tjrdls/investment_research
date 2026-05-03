@@ -4,214 +4,180 @@
 OHLCV (시가, 고가, 저가, 종가, 거래량) 데이터를 가져와 CSV 파일로 저장한다.
 """
 
+import logging
 from pykrx import stock as pykrx_stock
 import pandas as pd
 import os
 from datetime import datetime, timedelta
 import glob
 
+from config import DEFAULT_STOCKS, PERIOD_DAYS, DATA_DIR
 
-def collect_price_data(stock_code, start_date=None, end_date=None, period="3y"):
+logger = logging.getLogger(__name__)
+
+# 한국어 → 영어 컬럼 표준화 맵
+_KR_RENAME_MAP = {
+    "시가": "open",
+    "고가": "high",
+    "저가": "low",
+    "종가": "close",
+    "거래량": "volume",
+}
+
+
+def _normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """컬럼명을 소문자 영어로 표준화한다."""
+    df = df.copy()
+    df.columns = [col.lower() for col in df.columns]
+    df = df.rename(columns=lambda c: _KR_RENAME_MAP.get(c, c))
+    return df
+
+
+def collect_price_data(stock_code: str, start_date: str = None, end_date: str = None, period: str = "3y") -> pd.DataFrame:
     """
     한국 주식 데이터를 pykrx로 수집한다.
-    
-    :param stock_code: 주식 코드 (예: "005930" - 삼성전자)
+
+    :param stock_code: 주식 코드 (예: "005930")
     :param start_date: 시작 날짜 (YYYYMMDD 형식, 없으면 자동 계산)
     :param end_date: 종료 날짜 (YYYYMMDD 형식, 없으면 오늘)
     :param period: 기간 (기본 3년)
     :return: DataFrame with OHLCV
     """
-    print("   📈 주가 데이터 수집 중 ({})...".format(stock_code))
-    
-    # 날짜 설정
+    logger.info("📈 주가 데이터 수집 중 (%s)...", stock_code)
+
     if end_date is None:
         end_date = datetime.now().strftime("%Y%m%d")
-    
+
     if start_date is None:
-        # period에 따라 자동 계산
-        if period == "3y":
-            days = 1095
-        elif period == "1y":
-            days = 365
-        elif period == "6m":
-            days = 180
-        else:
-            days = 365
-        
-        start_dt = datetime.now() - timedelta(days=days)
-        start_date = start_dt.strftime("%Y%m%d")
-    
-    # 파일명 설정
-    filename = "data/downloads/{}.csv".format(stock_code)
-    
-    # 기존 데이터 확인
-    existing_df = None
-    if os.path.exists(filename):
-        try:
-            existing_df = pd.read_csv(filename, index_col=0, parse_dates=True)
-            existing_df.columns = [col.lower() for col in existing_df.columns]
-            print("   📂 기존 데이터 로드 완료 ({} 거래일)".format(len(existing_df)))
-        except Exception as e:
-            print("   ⚠️  기존 데이터 로드 실패: {}".format(str(e)))
-            existing_df = None
-    else:
-        # 기존 파일명 패턴으로 찾기 (호환성)
-        pattern = "data/downloads/{}_*.csv".format(stock_code)
-        existing_files = glob.glob(pattern)
-        data_files = [f for f in existing_files if 'financial' not in f]
-        if data_files:
-            try:
-                # 가장 최근 파일 사용
-                latest_file = max(data_files, key=os.path.getmtime)
-                existing_df = pd.read_csv(latest_file, index_col=0, parse_dates=True)
-                existing_df.columns = [col.lower() for col in existing_df.columns]
-                print("   📂 기존 데이터 로드 완료 ({} 거래일, 파일: {})".format(len(existing_df), os.path.basename(latest_file)))
-            except Exception as e:
-                print("   ⚠️  기존 데이터 로드 실패: {}".format(str(e)))
-                existing_df = None
-    
-    # 요청된 기간 계산
+        days = PERIOD_DAYS.get(period, PERIOD_DAYS["1y"])
+        start_date = (datetime.now() - timedelta(days=days)).strftime("%Y%m%d")
+
+    filename = "{}/{}.csv".format(DATA_DIR, stock_code)
+
+    existing_df = _load_existing(stock_code, filename)
+
     req_start = pd.to_datetime(start_date)
     req_end = pd.to_datetime(end_date)
-    
-    # 기존 데이터가 요청된 기간을 완전히 커버하는지 확인
+
     if existing_df is not None and len(existing_df) > 0:
         existing_start = existing_df.index.min()
         existing_end = existing_df.index.max()
-        
         if existing_start <= req_start and existing_end >= req_end:
-            print("   ✅ 기존 데이터가 요청 기간을 커버함 ({} ~ {})".format(
-                existing_start.strftime("%Y-%m-%d"), existing_end.strftime("%Y-%m-%d")))
+            logger.info("✅ 기존 데이터가 요청 기간을 커버함 (%s ~ %s)",
+                        existing_start.strftime("%Y-%m-%d"), existing_end.strftime("%Y-%m-%d"))
             return existing_df
-    
-    # 누락된 기간 계산
-    missing_periods = []
-    
-    if existing_df is None or len(existing_df) == 0:
-        # 전체 기간 다운로드
-        missing_periods.append((start_date, end_date))
-        print("   🔄 전체 기간 다운로드 필요")
-    else:
-        existing_start = existing_df.index.min()
-        existing_end = existing_df.index.max()
-        
-        # 시작 부분 누락
-        if req_start < existing_start:
-            missing_start = start_date
-            missing_end = min(req_end, existing_start - pd.Timedelta(days=1)).strftime("%Y%m%d")
-            if pd.to_datetime(missing_start) <= pd.to_datetime(missing_end):
-                missing_periods.append((missing_start, missing_end))
-                print("   🔄 시작 부분 누락: {} ~ {}".format(missing_start, missing_end))
-        
-        # 끝 부분 누락
-        if req_end > existing_end:
-            missing_start = max(req_start, existing_end + pd.Timedelta(days=1)).strftime("%Y%m%d")
-            missing_end = end_date
-            if pd.to_datetime(missing_start) <= pd.to_datetime(missing_end):
-                missing_periods.append((missing_start, missing_end))
-                print("   🔄 끝 부분 누락: {} ~ {}".format(missing_start, missing_end))
-    
-    # 누락된 데이터 다운로드 및 병합
+
+    missing_periods = _compute_missing_periods(existing_df, start_date, end_date, req_start, req_end)
+
     all_data = existing_df.copy() if existing_df is not None else pd.DataFrame()
-    
+
     for miss_start, miss_end in missing_periods:
         try:
-            print("   📥 누락 데이터 다운로드: {} ~ {}".format(miss_start, miss_end))
+            logger.info("📥 누락 데이터 다운로드: %s ~ %s", miss_start, miss_end)
             df = pykrx_stock.get_market_ohlcv(miss_start, miss_end, stock_code)
-            
+
             if df is not None and len(df) > 0:
-                # 컬럼명 정규화
-                df.columns = [col.lower() for col in df.columns]
-                
-                # 한국어 컬럼명을 영어 표준명으로 변환
-                rename_map = {
-                    "시가": "open",
-                    "고가": "high",
-                    "저가": "low",
-                    "종가": "close",
-                    "거래량": "volume",
-                    "open": "open",
-                    "high": "high",
-                    "low": "low",
-                    "close": "close",
-                    "volume": "volume"
-                }
-                df = df.rename(columns=lambda col: rename_map.get(col, col))
-                
-                # 인덱스를 datetime으로 변환
+                df = _normalize_columns(df)
                 df.index = pd.to_datetime(df.index)
-                
-                # 병합
-                if all_data.empty:
-                    all_data = df
-                else:
-                    all_data = pd.concat([all_data, df])
-                    
-                print("   ➕ 데이터 병합 완료 ({} 거래일 추가)".format(len(df)))
+                all_data = df if all_data.empty else pd.concat([all_data, df])
+                logger.info("➕ 데이터 병합 완료 (%d 거래일 추가)", len(df))
             else:
-                print("   ⚠️  누락 데이터 없음")
-                
+                logger.warning("누락 데이터 없음: %s ~ %s", miss_start, miss_end)
+
         except Exception as e:
-            print("   ❌ 누락 데이터 다운로드 실패: {}".format(str(e)))
-    
+            logger.error("❌ 누락 데이터 다운로드 실패: %s", e)
+
     if all_data.empty:
-        print("   ⚠️  데이터 없음: {}".format(stock_code))
+        logger.warning("데이터 없음: %s", stock_code)
         return pd.DataFrame()
-    
-    # 중복 제거 및 정렬
-    all_data = all_data[~all_data.index.duplicated(keep='last')]
-    all_data = all_data.sort_index()
-    
-    # 요청된 기간으로 필터링
+
+    all_data = all_data[~all_data.index.duplicated(keep="last")].sort_index()
     all_data = all_data[(all_data.index >= req_start) & (all_data.index <= req_end)]
-    
-    # CSV로 저장
-    os.makedirs("data/downloads", exist_ok=True)
+
+    os.makedirs(DATA_DIR, exist_ok=True)
     all_data.to_csv(filename)
-    
-    print("   💾 주가 데이터 저장 완료 ({} 거래일)".format(len(all_data)))
+    logger.info("💾 주가 데이터 저장 완료 (%d 거래일)", len(all_data))
     return all_data
 
 
-def get_top_stocks(market="KOSPI", top_n=5):
+def _load_existing(stock_code: str, filename: str) -> pd.DataFrame | None:
+    """기존 캐시 파일을 로드한다. 없으면 None 반환."""
+    if os.path.exists(filename):
+        try:
+            df = pd.read_csv(filename, index_col=0, parse_dates=True)
+            df = _normalize_columns(df)
+            logger.info("📂 기존 데이터 로드 완료 (%d 거래일)", len(df))
+            return df
+        except Exception as e:
+            logger.warning("기존 데이터 로드 실패: %s", e)
+            return None
+
+    # 구형 파일명 패턴 지원
+    pattern = "{}/{}_*.csv".format(DATA_DIR, stock_code)
+    data_files = [f for f in glob.glob(pattern) if "financial" not in f]
+    if data_files:
+        latest = max(data_files, key=os.path.getmtime)
+        try:
+            df = pd.read_csv(latest, index_col=0, parse_dates=True)
+            df = _normalize_columns(df)
+            logger.info("📂 기존 데이터 로드 완료 (%d 거래일, 파일: %s)", len(df), os.path.basename(latest))
+            return df
+        except Exception as e:
+            logger.warning("기존 데이터 로드 실패: %s", e)
+
+    return None
+
+
+def _compute_missing_periods(existing_df, start_date, end_date, req_start, req_end):
+    """기존 데이터와 요청 범위를 비교해 누락 구간 목록을 반환한다."""
+    if existing_df is None or len(existing_df) == 0:
+        logger.info("🔄 전체 기간 다운로드 필요")
+        return [(start_date, end_date)]
+
+    missing = []
+    existing_start = existing_df.index.min()
+    existing_end = existing_df.index.max()
+
+    if req_start < existing_start:
+        ms = start_date
+        me = min(req_end, existing_start - pd.Timedelta(days=1)).strftime("%Y%m%d")
+        if pd.to_datetime(ms) <= pd.to_datetime(me):
+            missing.append((ms, me))
+            logger.info("🔄 시작 부분 누락: %s ~ %s", ms, me)
+
+    if req_end > existing_end:
+        ms = max(req_start, existing_end + pd.Timedelta(days=1)).strftime("%Y%m%d")
+        me = end_date
+        if pd.to_datetime(ms) <= pd.to_datetime(me):
+            missing.append((ms, me))
+            logger.info("🔄 끝 부분 누락: %s ~ %s", ms, me)
+
+    return missing
+
+
+def get_top_stocks(market: str = "KOSPI", top_n: int = 5) -> list:
     """
     시총 상위 종목 가져오기
-    
+
     :param market: "KOSPI" 또는 "KOSDAQ"
     :param top_n: 상위 N개
     :return: list of (stock_code, stock_name)
     """
-    print("   🏆 {} 시총 상위 {} 종목 조회 중...".format(market, top_n))
-    
+    logger.info("🏆 %s 시총 상위 %d 종목 조회 중...", market, top_n)
+
     try:
         today = datetime.now().strftime("%Y%m%d")
-        
-        # 시총 기반으로 정렬된 데이터 가져오기
         market_cap = pykrx_stock.get_market_cap_by_ticker(today, market=market)
-        
-        # 상위 N개 추출
         top_stocks = market_cap.head(top_n)
-        
-        result = []
-        for code, row in top_stocks.iterrows():
-            result.append((code, row.get('name', code)))
-        
-        print("   ✅ 조회 완료: {}".format([name for _, name in result]))
+        result = [(code, row.get("name", code)) for code, row in top_stocks.iterrows()]
+        logger.info("✅ 조회 완료: %s", [name for _, name in result])
         return result
-    
+
     except Exception as e:
-        print("   ⚠️  시총 조회 실패: {}".format(str(e)))
-        # 폴백: 하드코딩된 상위 종목
-        return [
-            ("005930", "삼성전자"),
-            ("000660", "SK하이닉스"),
-            ("373220", "LG에너지솔루션"),
-            ("207940", "삼성바이오로직스"),
-            ("005380", "현대차")
-        ]
+        logger.warning("시총 조회 실패: %s — 기본 종목 사용", e)
+        return list(DEFAULT_STOCKS[:top_n])
 
 
 if __name__ == "__main__":
-    # 테스트: 삼성전자 데이터 수집
     data = collect_price_data("005930")
     print(data.head())

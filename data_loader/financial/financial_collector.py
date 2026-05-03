@@ -4,6 +4,7 @@
 매출, 영업이익, 순이익, 부채비율 등의 주요 재무 지표를 가져와 저장한다.
 """
 
+import logging
 import requests
 import pandas as pd
 import os
@@ -15,7 +16,11 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+logger = logging.getLogger(__name__)
+
 DART_API_KEY = os.getenv("DART_API_KEY", "")
+if not DART_API_KEY:
+    logger.warning("DART_API_KEY가 설정되지 않았습니다. 재무 데이터 수집이 실패합니다.")
 
 
 def get_corp_code_map():
@@ -24,7 +29,7 @@ def get_corp_code_map():
     
     :return: dict {stock_code: {"corp_code": ..., "name": ...}}
     """
-    print("   기업코드 목록 다운로드 중...")
+    logger.info("기업코드 목록 다운로드 중...")
     
     try:
         r = requests.get(
@@ -49,11 +54,11 @@ def get_corp_code_map():
                     "name": corp_name
                 }
         
-        print("   ✅ {} 개 종목 로드".format(len(mapping)))
+        logger.info("✅ %d 개 종목 로드", len(mapping))
         return mapping
     
     except Exception as e:
-        print("   ❌ 기업코드 로드 실패: {}".format(str(e)))
+        logger.error("기업코드 로드 실패: %s", e)
         return {}
 
 
@@ -74,7 +79,7 @@ def dart_api_call(endpoint, params):
             timeout=10
         )
         return r.json()
-    except Exception as e:
+    except requests.RequestException as e:
         return {"status": "999", "message": str(e)}
 
 
@@ -118,7 +123,7 @@ def get_financial_statements(corp_code, year, reprt_code="11011"):
                     amt = (item.get("thstrm_amount", "0") or "0").replace(",", "")
                     try:
                         return float(amt)
-                    except:
+                    except (ValueError, TypeError):
                         pass
         return 0.0
     
@@ -156,7 +161,7 @@ def get_stock_count(corp_code, year, reprt_code="11011"):
             cnt = (item.get("distb_stock_co", "0") or "0").replace(",", "")
             try:
                 return float(cnt)
-            except:
+            except (ValueError, TypeError):
                 pass
     
     return None
@@ -171,7 +176,7 @@ def collect_financial_data(stock_code, corp_code, year_range=2):
     :param year_range: 몇 년치 데이터를 수집할지
     :return: DataFrame with financial metrics
     """
-    print("   📊 재무제표 데이터 수집 중 ({})...".format(stock_code))
+    logger.info("📊 재무제표 데이터 수집 중 (%s)...", stock_code)
     
     records = []
     
@@ -213,21 +218,20 @@ def collect_financial_data(stock_code, corp_code, year_range=2):
                 time.sleep(0.3)
         
         if not records:
-            print("   ⚠️  재무제표 데이터 없음")
+            logger.warning("재무제표 데이터 없음: %s", stock_code)
             return pd.DataFrame()
-        
+
         df = pd.DataFrame(records)
-        
-        # CSV로 저장
+
         os.makedirs("data/downloads", exist_ok=True)
         filename = "data/downloads/{}_financial.csv".format(stock_code)
         df.to_csv(filename, index=False)
-        
-        print("   💾 재무제표 저장 완료 ({} 기간)".format(len(records)))
+
+        logger.info("💾 재무제표 저장 완료 (%d 기간)", len(records))
         return df
-    
+
     except Exception as e:
-        print("   ❌ 재무제표 수집 실패: {}".format(str(e)))
+        logger.error("❌ 재무제표 수집 실패: %s", e)
         return pd.DataFrame()
 
 

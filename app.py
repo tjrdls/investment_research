@@ -4,6 +4,11 @@
 Streamlit 웹 대시보드 실행
 """
 
+import logging
+
+from utils.logger import configure_root_logger
+configure_root_logger()
+
 import streamlit as st
 
 # 필요한 모듈들을 미리 임포트하여 메모리에 로드

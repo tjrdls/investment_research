@@ -3,179 +3,139 @@
 역할: NewsAPI와 OpenAI를 사용하여 종목과 시장 뉴스를 수집하고 호재/악재를 분석하는 모듈.
 """
 
-import requests
 import json
+import logging
 import os
 from datetime import date, timedelta
+from typing import List, Optional
+
+import requests
 from openai import OpenAI
 from dotenv import load_dotenv
 
+from config import GPT_MODEL, GPT_TEMPERATURE, GPT_MAX_TOKENS_NEWS
+
 load_dotenv()
+
+logger = logging.getLogger(__name__)
 
 NEWSAPI_KEY = os.getenv("NEWSAPI_KEY", "")
 openai_client = OpenAI(api_key=os.getenv("OPENAI_API_KEY", ""))
 
 
-def fetch_news(query, max_items=5, language="ko"):
+def fetch_news(query: str, max_items: int = 5, language: str = "ko") -> List[dict]:
     """
-    NewsAPI로 최신 뉴스 수집
-    
+    NewsAPI로 최신 뉴스 수집.
+
     :param query: 검색 쿼리
     :param max_items: 최대 아이템 수
-    :param language: 언어 ("ko" 또는 "en")
+    :param language: "ko" 또는 "en"
     :return: list of news articles
     """
     try:
         today = date.today().strftime("%Y-%m-%d")
         yesterday = (date.today() - timedelta(days=1)).strftime("%Y-%m-%d")
-        
-        url = "https://newsapi.org/v2/everything"
-        params = {
-            "q": query,
-            "from": yesterday,
-            "to": today,
-            "language": language,
-            "sortBy": "publishedAt",
-            "pageSize": max_items,
-            "apiKey": NEWSAPI_KEY
-        }
-        
-        r = requests.get(url, params=params, timeout=10)
+
+        r = requests.get(
+            "https://newsapi.org/v2/everything",
+            params={
+                "q": query,
+                "from": yesterday,
+                "to": today,
+                "language": language,
+                "sortBy": "publishedAt",
+                "pageSize": max_items,
+                "apiKey": NEWSAPI_KEY,
+            },
+            timeout=10,
+        )
         data = r.json()
-        
+
         if data.get("status") != "ok":
             return []
-        
-        articles = data.get("articles", [])
+
         result = []
-        
-        for a in articles:
+        for a in data.get("articles", []):
             title = a.get("title", "")
-            source = a.get("source", {}).get("name", "")
-            pub_at = a.get("publishedAt", "")[:16]
-            desc = a.get("description") or ""
-            
             if title and "[Removed]" not in title:
                 result.append({
                     "title": title,
-                    "source": source,
-                    "published": pub_at,
-                    "description": desc[:100]
+                    "source": a.get("source", {}).get("name", ""),
+                    "published": a.get("publishedAt", "")[:16],
+                    "description": (a.get("description") or "")[:100],
                 })
-        
         return result
-    
+
+    except requests.RequestException as e:
+        logger.warning("⚠️ NewsAPI 요청 오류: %s", e)
+        return []
     except Exception as e:
-        print("    ⚠️  NewsAPI 오류: {}".format(str(e)))
+        logger.warning("⚠️ NewsAPI 오류: %s", e)
         return []
 
 
-def collect_stock_news(stock_name, queries=None):
-    """
-    특정 주식 종목의 뉴스 수집
-    
-    :param stock_name: 회사명 (예: "삼성전자")
-    :param queries: 검색 쿼리 리스트 (없으면 회사명만 사용)
-    :return: list of news
-    """
-    if queries is None:
-        queries = [stock_name]
-    
-    news = []
-    
-    for q in queries:
-        # 한글/영문 판단
-        lang = "ko" if any(ord(c) > 127 for c in q) else "en"
-        items = fetch_news(q, max_items=4, language=lang)
-        news.extend(items)
-    
-    # 중복 제거
-    seen = set()
+def _deduplicate(news_list: List[dict]) -> List[dict]:
+    seen: set = set()
     unique = []
-    for n in news:
-        if n["title"] not in seen:
-            seen.add(n["title"])
-            unique.append(n)
-    
+    for item in news_list:
+        if item["title"] not in seen:
+            seen.add(item["title"])
+            unique.append(item)
     return unique
 
 
-def collect_macro_news():
-    """
-    글로벌 매크로 뉴스 수집
-    
-    :return: list of macro news
-    """
-    queries_en = [
-        "stock market today",
-        "US Federal Reserve interest rate",
-        "oil price today",
-        "semiconductor market today"
-    ]
-    
-    queries_ko = [
-        "코스피",
-        "미국 증시",
-        "환율",
-    ]
-    
-    news = []
-    
+def collect_stock_news(stock_name: str, queries: List[str] = None) -> List[dict]:
+    """특정 주식 종목의 뉴스 수집."""
+    if queries is None:
+        queries = [stock_name]
+
+    news: List[dict] = []
+    for q in queries:
+        lang = "ko" if any(ord(c) > 127 for c in q) else "en"
+        news.extend(fetch_news(q, max_items=4, language=lang))
+
+    return _deduplicate(news)
+
+
+def collect_macro_news() -> List[dict]:
+    """글로벌 매크로 뉴스 수집."""
+    queries_en = ["stock market today", "US Federal Reserve interest rate", "oil price today", "semiconductor market today"]
+    queries_ko = ["코스피", "미국 증시", "환율"]
+
+    news: List[dict] = []
     for q in queries_en:
-        items = fetch_news(q, max_items=2, language="en")
-        news.extend(items)
-    
+        news.extend(fetch_news(q, max_items=2, language="en"))
     for q in queries_ko:
-        items = fetch_news(q, max_items=2, language="ko")
-        news.extend(items)
-    
-    # 중복 제거
-    seen = set()
-    unique = []
-    for n in news:
-        if n["title"] not in seen:
-            seen.add(n["title"])
-            unique.append(n)
-    
-    return unique[:10]  # 최상위 10개만
+        news.extend(fetch_news(q, max_items=2, language="ko"))
+
+    return _deduplicate(news)[:10]
 
 
-def format_news_for_gpt(news_list):
-    """
-    뉴스 리스트를 GPT 프롬프트용으로 포맷팅
-    
-    :param news_list: news articles list
-    :return: formatted text
-    """
+def format_news_for_gpt(news_list: List[dict]) -> str:
     if not news_list:
         return "관련 뉴스 없음"
-    
     lines = []
     for n in news_list:
-        lines.append("[{}][{}] {}".format(
-            n["published"],
-            n["source"],
-            n["title"]
-        ))
+        lines.append("[{}][{}] {}".format(n["published"], n["source"], n["title"]))
         if n["description"]:
             lines.append("  └ {}".format(n["description"]))
-    
     return "\n".join(lines)
 
 
-def analyze_news_with_gpt(stock_name, stock_news, macro_news):
+def analyze_news_with_gpt(stock_name: str, stock_news: List[dict], macro_news: List[dict]) -> Optional[dict]:
     """
-    뉴스를 종합하여 GPT로 호재/악재 분석
-    
-    :param stock_name: 종목명
-    :param stock_news: 종목 관련 뉴스 리스트
-    :param macro_news: 매크로 뉴스 리스트
-    :return: dict with analysis result
+    뉴스를 종합하여 GPT로 호재/악재 분석.
+
+    빈 뉴스 리스트는 GPT를 호출하지 않고 None을 반환한다.
     """
+    if not stock_news and not macro_news:
+        logger.warning("뉴스 없음 — GPT 분석 스킵")
+        return None
+
     today_str = date.today().strftime("%Y년 %m월 %d일")
     stock_text = format_news_for_gpt(stock_news[:8])
     macro_text = format_news_for_gpt(macro_news[:10])
-    
+
     prompt = """당신은 한국 주식시장 전문 애널리스트입니다.
 오늘은 {}입니다.
 
@@ -199,42 +159,30 @@ def analyze_news_with_gpt(stock_name, stock_news, macro_news):
   "top_risks": ["리스크1", "리스크2"],
   "top_opportunities": ["기회1", "기회2"],
   "recommendation": "매수적극/매수신중/관망/매도고려/매도추천 중 하나"
-}}""".format(
-        today_str,
-        stock_name,
-        stock_text,
-        macro_text,
-        stock_name
-    )
-    
+}}""".format(today_str, stock_name, stock_text, macro_text, stock_name)
+
     try:
         resp = openai_client.chat.completions.create(
-            model="gpt-4o-mini",
+            model=GPT_MODEL,
             messages=[{"role": "user", "content": prompt}],
-            temperature=0.1,
-            max_tokens=500
+            temperature=GPT_TEMPERATURE,
+            max_tokens=GPT_MAX_TOKENS_NEWS,
         )
-        
-        raw = resp.choices[0].message.content.strip()
-        raw = raw.replace("```json", "").replace("```", "").strip()
-        
+        raw = resp.choices[0].message.content.strip().replace("```json", "").replace("```", "").strip()
         return json.loads(raw)
-    
+
     except json.JSONDecodeError:
-        print("    ⚠️  JSON 파싱 실패")
+        logger.warning("⚠️ JSON 파싱 실패")
         return None
     except Exception as e:
-        print("    ⚠️  GPT 오류: {}".format(str(e)))
+        logger.warning("⚠️ GPT 오류: %s", e)
         return None
 
 
 if __name__ == "__main__":
-    # 테스트
-    stock_news = collect_stock_news("삼성전자", ["삼성전자", "Samsung Electronics"])
-    macro_news = collect_macro_news()
-    
-    print("종목 뉴스: {}건".format(len(stock_news)))
-    print("매크로 뉴스: {}건".format(len(macro_news)))
-    
-    analysis = analyze_news_with_gpt("삼성전자", stock_news, macro_news)
-    print(json.dumps(analysis, ensure_ascii=False, indent=2))
+    sn = collect_stock_news("삼성전자", ["삼성전자", "Samsung Electronics"])
+    mn = collect_macro_news()
+    print("종목 뉴스: {}건".format(len(sn)))
+    print("매크로 뉴스: {}건".format(len(mn)))
+    result = analyze_news_with_gpt("삼성전자", sn, mn)
+    print(json.dumps(result, ensure_ascii=False, indent=2))
