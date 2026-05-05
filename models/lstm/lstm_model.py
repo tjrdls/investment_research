@@ -176,20 +176,17 @@ def train_model(
     model = StockPredictor().to(DEVICE)
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-4)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs, eta_min=1e-5)
-<<<<<<< HEAD
 
-    # 클래스 불균형 보정
-    labels_arr = train_loader.dataset.labels.numpy()
-    n_total = len(labels_arr)
-    cls_cnt = np.bincount(labels_arr, minlength=3).astype(np.float32)
-    cls_cnt = np.where(cls_cnt == 0, 1.0, cls_cnt)
-    cls_weights = torch.FloatTensor((1.0 / cls_cnt) * n_total / 3).to(DEVICE)
-    criterion = nn.CrossEntropyLoss(weight=cls_weights)
-    logger.info("클래스 가중치: 상승=%.3f 하락=%.3f 횡보=%.3f", cls_weights[0], cls_weights[1], cls_weights[2])
-=======
-    weights = class_weights.to(DEVICE) if class_weights is not None else None
+    if class_weights is not None:
+        weights = class_weights.to(DEVICE)
+    else:
+        labels_arr = train_loader.dataset.labels.numpy()
+        n_total = len(labels_arr)
+        cls_cnt = np.bincount(labels_arr, minlength=3).astype(np.float32)
+        cls_cnt = np.where(cls_cnt == 0, 1.0, cls_cnt)
+        weights = torch.FloatTensor((1.0 / cls_cnt) * n_total / 3).to(DEVICE)
+        logger.info("클래스 가중치: 상승=%.3f 하락=%.3f 횡보=%.3f", weights[0], weights[1], weights[2])
     criterion = nn.CrossEntropyLoss(weight=weights)
->>>>>>> 803219d (train변경)
 
     history = {"tr_loss": [], "val_loss": [], "tr_acc": [], "val_acc": []}
     es_counter = 0

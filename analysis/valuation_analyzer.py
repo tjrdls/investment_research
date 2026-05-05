@@ -109,7 +109,7 @@ def get_industry_valuation_from_gpt(
             model=model_choice,
             messages=[{"role": "user", "content": prompt}],
             temperature=GPT_TEMPERATURE,
-            max_tokens=GPT_MAX_TOKENS_VALUATION,
+            max_completion_tokens=GPT_MAX_TOKENS_VALUATION,
         )
         raw = resp.choices[0].message.content.strip().replace("```json", "").replace("```", "").strip()
         return json.loads(raw)

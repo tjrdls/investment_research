@@ -133,7 +133,7 @@ def analyze_with_llm(
             model=model_choice,
             messages=[{"role": "user", "content": prompt}],
             temperature=GPT_TEMPERATURE,
-            max_tokens=GPT_MAX_TOKENS_ANALYSIS,
+            max_completion_tokens=GPT_MAX_TOKENS_ANALYSIS,
         )
         raw = resp.choices[0].message.content.strip().replace("```json", "").replace("```", "").strip()
         analysis = json.loads(raw)

@@ -282,7 +282,7 @@ def run_financial_analysis(stock_code: str, financial_data, current_price: float
         return {}
 
 
-def run_final_analysis(stock_code: str, stock_name: str, analysis_result: dict) -> dict:
+def run_final_analysis(stock_code: str, stock_name: str, analysis_result: dict, model: str = None) -> dict:
     """최종 AI 종합 분석만 실행."""
     try:
         logger.info("🔄 AI 종합 분석 시작...")
