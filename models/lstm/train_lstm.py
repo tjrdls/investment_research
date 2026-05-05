@@ -8,8 +8,11 @@ import logging
 import sys
 import os
 
+import numpy as np
 import torch
 from torch.utils.data import DataLoader
+from sklearn.utils.class_weight import compute_class_weight
+from sklearn.metrics import classification_report
 
 project_root = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
 sys.path.insert(0, project_root)
@@ -101,16 +104,27 @@ def train_lstm() -> bool:
     n = len(X_seq)
     train_end = int(n * 0.70)
     val_end = int(n * 0.85)
+
+    Y_train = Y[:train_end]
+    classes = np.unique(Y_train)
+    weights = compute_class_weight("balanced", classes=classes, y=Y_train)
+    # classes가 0,1,2 순서를 보장하기 위해 정렬된 순서로 패딩
+    full_weights = np.ones(3, dtype=np.float32)
+    for cls, w in zip(classes, weights):
+        full_weights[cls] = w
+    class_weights = torch.FloatTensor(full_weights)
+    logger.info("클래스 가중치 — 상승: %.3f  하락: %.3f  횡보: %.3f", *full_weights)
+
     train_loader = DataLoader(
-        StockDataset(X_seq[:train_end], Y[:train_end]),
+        StockDataset(X_seq[:train_end], X_txt[:train_end], Y_train),
         batch_size=32, shuffle=True,
     )
     val_loader = DataLoader(
-        StockDataset(X_seq[train_end:val_end], Y[train_end:val_end]),
+        StockDataset(X_seq[train_end:val_end], X_txt[train_end:val_end], Y[train_end:val_end]),
         batch_size=32, shuffle=False,
     )
     test_loader = DataLoader(
-        StockDataset(X_seq[val_end:], Y[val_end:]),
+        StockDataset(X_seq[val_end:], X_txt[val_end:], Y[val_end:]),
         batch_size=32, shuffle=False,
     )
     logger.info("학습: %d  검증: %d  테스트: %d",
@@ -120,7 +134,11 @@ def train_lstm() -> bool:
     logger.info("모델 생성 완료 (Device: %s, 파라미터: %s개)",
                 DEVICE, f"{sum(p.numel() for p in model.parameters()):,}")
 
-    model, history = train_model(train_loader, val_loader, epochs=50, lr=0.001, patience=10)
+    model, history = train_model(
+        train_loader, val_loader,
+        epochs=50, lr=0.001, patience=10,
+        class_weights=class_weights,
+    )
 
     torch.save(model.state_dict(), MODEL_PATH)
     logger.info("✅ 모델 저장 완료: %s", MODEL_PATH)
@@ -129,12 +147,24 @@ def train_lstm() -> bool:
         logger.info("최고 검증 정확도: %.2f%%  최저 검증 손실: %.4f",
                     max(history["val_acc"]) * 100, min(history["val_loss"]))
 
+    # Test set 평가
     logger.info("=" * 60)
     logger.info("📊 Test Set 최종 평가")
-    logger.info("=" * 60)
-    test_result = evaluate_model(model, test_loader)
-    logger.info("테스트 정확도: %.2f%%", test_result["accuracy"] * 100)
-    logger.info("\n%s", test_result["report"])
+    model.eval()
+    all_preds, all_labels = [], []
+    with torch.no_grad():
+        for seq, txt, lbl in test_loader:
+            seq, txt, lbl = seq.to(DEVICE), txt.to(DEVICE), lbl.to(DEVICE)
+            preds = model(seq, txt).argmax(1)
+            all_preds.extend(preds.cpu().numpy())
+            all_labels.extend(lbl.cpu().numpy())
+
+    report = classification_report(
+        all_labels, all_preds,
+        target_names=["상승", "하락", "횡보"],
+        zero_division=0,
+    )
+    logger.info("Classification Report:\n%s", report)
 
     return True
 
