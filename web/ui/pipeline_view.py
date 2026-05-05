@@ -83,7 +83,10 @@ def run_single_stage_analysis(stage_name: str, selected_code: str, selected_peri
             if st.session_state.stock_news and st.session_state.macro_news:
                 name = _get_display_name(selected_code)
                 news_analysis = analyze_news_with_gpt(
-                    name, st.session_state.stock_news, st.session_state.macro_news
+                    name,
+                    st.session_state.stock_news,
+                    st.session_state.macro_news,
+                    model=getattr(st.session_state, "gpt_model", None),
                 )
                 if st.session_state.analysis_result is None:
                     st.session_state.analysis_result = {}
@@ -105,7 +108,12 @@ def run_single_stage_analysis(stage_name: str, selected_code: str, selected_peri
 
             if st.session_state.analysis_result:
                 name = _get_display_name(selected_code)
-                final = run_final_analysis(selected_code, name, st.session_state.analysis_result)
+                final = run_final_analysis(
+                    selected_code,
+                    name,
+                    st.session_state.analysis_result,
+                    model=getattr(st.session_state, "gpt_model", None),
+                )
                 st.session_state.analysis_result["final_analysis"] = final
 
         set_tab_status(stage_name, "completed")

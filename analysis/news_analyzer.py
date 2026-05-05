@@ -122,7 +122,12 @@ def format_news_for_gpt(news_list: List[dict]) -> str:
     return "\n".join(lines)
 
 
-def analyze_news_with_gpt(stock_name: str, stock_news: List[dict], macro_news: List[dict]) -> Optional[dict]:
+def analyze_news_with_gpt(
+    stock_name: str,
+    stock_news: List[dict],
+    macro_news: List[dict],
+    model: Optional[str] = None,
+) -> Optional[dict]:
     """
     뉴스를 종합하여 GPT로 호재/악재 분석.
 
@@ -132,6 +137,7 @@ def analyze_news_with_gpt(stock_name: str, stock_news: List[dict], macro_news: L
         logger.warning("뉴스 없음 — GPT 분석 스킵")
         return None
 
+    model_choice = model or GPT_MODEL
     today_str = date.today().strftime("%Y년 %m월 %d일")
     stock_text = format_news_for_gpt(stock_news[:8])
     macro_text = format_news_for_gpt(macro_news[:10])
@@ -163,7 +169,7 @@ def analyze_news_with_gpt(stock_name: str, stock_news: List[dict], macro_news: L
 
     try:
         resp = openai_client.chat.completions.create(
-            model=GPT_MODEL,
+            model=model_choice,
             messages=[{"role": "user", "content": prompt}],
             temperature=GPT_TEMPERATURE,
             max_tokens=GPT_MAX_TOKENS_NEWS,

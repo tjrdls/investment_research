@@ -67,8 +67,15 @@ def calculate_ttm_metrics(financial_records: list, current_price: float) -> dict
     return metrics
 
 
-def get_industry_valuation_from_gpt(stock_name: str, industry: str, metrics: dict, current_price: float) -> dict:
+def get_industry_valuation_from_gpt(
+    stock_name: str,
+    industry: str,
+    metrics: dict,
+    current_price: float,
+    model: Optional[str] = None,
+) -> dict:
     """OpenAI GPT를 통해 업종 대비 밸류에이션 평가."""
+    model_choice = model or GPT_MODEL
     prompt = """한국 주식시장 전문 애널리스트입니다.
 
 {} ({} 업종) TTM 기준 지표:
@@ -99,7 +106,7 @@ def get_industry_valuation_from_gpt(stock_name: str, industry: str, metrics: dic
 
     try:
         resp = openai_client.chat.completions.create(
-            model=GPT_MODEL,
+            model=model_choice,
             messages=[{"role": "user", "content": prompt}],
             temperature=GPT_TEMPERATURE,
             max_tokens=GPT_MAX_TOKENS_VALUATION,

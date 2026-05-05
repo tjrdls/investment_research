@@ -1,0 +1,31 @@
+flowchart LR
+    subgraph 외부_데이터["📥 외부 데이터"]
+        A1[pykrx\nKRX 주가]
+        A2[OpenDART\n재무제표]
+        A3[NewsAPI\n뉴스]
+    end
+
+    subgraph 처리["⚙️ 처리"]
+        B1[주가 + 기술지표\nOHLCV → RSI·MACD·볼린저]
+        B2[재무지표\n매출·순이익 → PER·PBR·ROE]
+        B3[뉴스 감성\n호재·악재 점수]
+        B4[텍스트 임베딩\n재무요약 → 1536-d vector]
+        B5[LSTM 예측\n기술지표 + 임베딩 → 상승·하락·횡보]
+    end
+
+    subgraph 결과["📤 최종 출력"]
+        C1[AI 종합 분석\n매수·관망·매도 추천]
+    end
+
+    A1 --> B1
+    A2 --> B2
+    A2 --> B4
+    A3 --> B3
+
+    B1 --> B5
+    B4 --> B5
+
+    B5 --> C1
+    B1 --> C1
+    B2 --> C1
+    B3 --> C1

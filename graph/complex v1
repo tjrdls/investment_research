@@ -1,0 +1,81 @@
+flowchart TD
+    User([사용자]) -->|종목 선택 + 분석 시작| Sidebar
+
+    subgraph UI["웹 UI (Streamlit)"]
+        Sidebar[sidebar.py\n종목·기간 선택]
+        PipelineView[pipeline_view.py\n탭 기반 진행 UI]
+        Sidebar -->|selected_code, period| PipelineView
+    end
+
+    subgraph Stage1["① 데이터 수집"]
+        pykrx[(pykrx\nKRX 주가)] --> DataCollector[data_collector.py\ncollect_price_data]
+        DataCollector -->|CSV 캐시| Cache[(data/downloads/\n*.csv)]
+        Cache -.->|재사용| DataCollector
+        DataCollector --> price_df[(price_df\nOHLCV DataFrame)]
+    end
+
+    subgraph Stage2["② 재무 데이터 수집"]
+        OpenDART[(OpenDART API\n재무제표)] --> FinCollector[financial_collector.py\ncollect_financial_data]
+        FinCollector --> financial_df[(financial_df\n매출·순이익·ROE 등)]
+    end
+
+    subgraph Stage3["③ 기술 분석"]
+        price_df --> TechIndicators[technical_indicators.py\ncalculate_indicators]
+        TechIndicators --> indicators_df[(indicators_df\nRSI·MACD·볼린저밴드 등)]
+        indicators_df --> TechSignals[get_technical_signals\nTechnicalSignals TypedDict]
+        TechSignals --> tech_result[(signals\nwarnings\nscore)]
+    end
+
+    subgraph Stage4["④ 재무 분석"]
+        financial_df --> ValAnalyzer[valuation_analyzer.py\ncalculate_ttm_metrics]
+        price_df -->|현재가| ValAnalyzer
+        ValAnalyzer --> valuation[(PER·PBR\nROE·PSR\ndebt_ratio)]
+    end
+
+    subgraph Stage5["⑤⑥ 뉴스 수집·분석"]
+        NewsAPI[(NewsAPI\n뉴스)] --> NewsCollector[news_analyzer.py\ncollect_stock_news\ncollect_macro_news]
+        NewsCollector --> news_raw[(stock_news\nmacro_news)]
+        news_raw --> GPT_news[analyze_news_with_gpt\ngpt-4o-mini]
+        GPT_news --> news_analysis[(verdict·score\nbullish/bearish_prob\nrecommendation)]
+    end
+
+    subgraph Stage6["⑦ LSTM 예측"]
+        financial_df --> ContextText[build_context_text]
+        ContextText --> EmbAPI[(OpenAI\ntext-embedding-ada-002)]
+        EmbAPI --> text_emb[(text_embedding\n1536-d vector)]
+        indicators_df --> LSTMModel[lstm_model.py\nMultimodalStockPredictor]
+        text_emb --> LSTMModel
+        LSTMModel -->|로컬 .pth 파일| ModelFile[(best_multimodal\n_stock_model.pth)]
+        ModelFile -.->|load| LSTMModel
+        LSTMModel --> lstm_pred[(prediction\n상승·하락·횡보\nconfidence)]
+    end
+
+    subgraph Stage7["⑧ AI 종합 분석"]
+        lstm_pred --> LLMAnalyzer[llm_analyzer.py\nanalyze_with_llm]
+        tech_result --> LLMAnalyzer
+        news_analysis --> LLMAnalyzer
+        valuation --> LLMAnalyzer
+        LLMAnalyzer --> GPT_final[(gpt-4o-mini\n최종 종합)]
+        GPT_final --> final_analysis[(recommendation\nsummary\nrisks·opportunities\nstrategy)]
+    end
+
+    PipelineView --> Stage1
+    PipelineView --> Stage2
+    Stage1 --> Stage3
+    Stage2 --> Stage4
+    Stage3 --> Stage5
+    Stage4 --> Stage5
+    Stage5 --> Stage6
+    Stage6 --> Stage7
+
+    final_analysis -->|analysis_result\nsession_state| PipelineView
+    PipelineView -->|탭별 결과 렌더링| User
+
+    subgraph Config["공통 설정"]
+        config_py[config.py\nDEFAULT_STOCKS\nLSTM 하이퍼파라미터\nAPI 설정]
+    end
+
+    config_py -.->|상수 공급| DataCollector
+    config_py -.->|상수 공급| LSTMModel
+    config_py -.->|상수 공급| GPT_news
+    config_py -.->|상수 공급| LLMAnalyzer

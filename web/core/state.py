@@ -4,7 +4,7 @@
 """
 
 import streamlit as st
-from config import DEFAULT_STOCKS, PERIOD_OPTIONS
+from config import DEFAULT_STOCKS, PERIOD_OPTIONS, GPT_MODEL
 
 ANALYSIS_STAGES = [
     ("데이터 수집", "💾"),
@@ -38,7 +38,7 @@ def init_session_state() -> None:
         st.session_state.analysis_in_progress = False
         st.session_state.current_stage = None
         st.session_state.lstm_mode = "default"
-        st.session_state.gpt_model = "gpt-4o-mini"
+        st.session_state.gpt_model = GPT_MODEL
         # tab_states 하나로 단계 완료 여부와 UI 상태를 모두 추적
         st.session_state.tab_states = {s[0]: "waiting" for s in ANALYSIS_STAGES}
         st.session_state.analysis_ready = False

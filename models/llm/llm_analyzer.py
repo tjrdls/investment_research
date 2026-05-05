@@ -28,6 +28,7 @@ def analyze_with_llm(
     tech_signals: dict,
     news_analysis: Optional[dict],
     valuation_metrics: dict,
+    model: Optional[str] = None,
 ) -> Optional[dict]:
     """
     모든 분석 결과를 종합하여 최종 투자 의견 생성.
@@ -36,6 +37,8 @@ def analyze_with_llm(
     :return: 최종 의견 dict 또는 None
     """
     logger.info("[LLM] 최종 분석 중...")
+
+    model_choice = model or GPT_MODEL
 
     signals_list: List[str] = tech_signals.get("signals") or []
     warnings_list: List[str] = tech_signals.get("warnings") or []
@@ -107,7 +110,7 @@ def analyze_with_llm(
 
     try:
         resp = openai_client.chat.completions.create(
-            model=GPT_MODEL,
+            model=model_choice,
             messages=[{"role": "user", "content": prompt}],
             temperature=GPT_TEMPERATURE,
             max_tokens=GPT_MAX_TOKENS_ANALYSIS,

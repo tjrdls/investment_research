@@ -10,6 +10,7 @@ import time
 import numpy as np
 import torch
 from datetime import datetime
+from typing import Optional
 
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 
@@ -145,12 +146,12 @@ def _step_lstm(indicators_df, text_emb: np.ndarray) -> dict:
         return {"prediction": "기술 오류", "probabilities": {"상승": 0.33, "하락": 0.33, "횡보": 0.34}, "confidence": 0.0}
 
 
-def _step_news(stock_name: str, stock_code: str) -> tuple:
+def _step_news(stock_name: str, stock_code: str, model: Optional[str] = None) -> tuple:
     """[6] 뉴스 수집 + GPT 감성 분석. (news_meta, news_analysis) 반환."""
     logger.info("[6/6] 뉴스 분석...")
     stock_news = collect_stock_news(stock_name, [stock_name, "{}({})".format(stock_name, stock_code)])
     macro_news = collect_macro_news()
-    analysis = analyze_news_with_gpt(stock_name, stock_news, macro_news)
+    analysis = analyze_news_with_gpt(stock_name, stock_news, macro_news, model=model)
     if analysis:
         logger.info("✅ %s: %s", analysis.get("verdict", "중립"), analysis.get("recommendation", "관망"))
     else:
@@ -168,11 +169,19 @@ def _step_valuation(financial_df, current_price: float) -> dict:
     return metrics
 
 
-def _step_llm(stock_name: str, stock_code: str, lstm_pred: dict,
-              tech: dict, news_analysis, valuation: dict, current_price: float) -> dict | None:
+def _step_llm(
+    stock_name: str,
+    stock_code: str,
+    lstm_pred: dict,
+    tech: dict,
+    news_analysis,
+    valuation: dict,
+    current_price: float,
+    model: Optional[str] = None,
+) -> dict | None:
     """[8] 최종 LLM 종합 분석."""
     logger.info("[8/6] 최종 LLM 분석...")
-    final = analyze_with_llm(stock_name, lstm_pred, tech, news_analysis, valuation)
+    final = analyze_with_llm(stock_name, lstm_pred, tech, news_analysis, valuation, model=model)
     if final:
         logger.info("✅ %s", final.get("recommendation", "관망"))
         report = format_final_report(stock_name, stock_code, final, current_price)
@@ -212,14 +221,27 @@ def run_single_stock_analysis(stock_code: str, stock_name: str) -> dict:
         result["lstm_prediction"] = lstm_pred
         time.sleep(0.5)
 
-        news_meta, news_analysis = _step_news(stock_name, stock_code)
+        news_meta, news_analysis = _step_news(
+            stock_name,
+            stock_code,
+            model=getattr(getattr(sys.modules.get("streamlit"), "session_state", {}), "gpt_model", None) if "streamlit" in sys.modules else None,
+        )
         result["news"] = news_meta
         time.sleep(1)
 
         valuation = _step_valuation(financial_df, current_price)
         result["valuation"] = valuation
 
-        final = _step_llm(stock_name, stock_code, lstm_pred, tech, news_analysis, valuation, current_price)
+        final = _step_llm(
+            stock_name,
+            stock_code,
+            lstm_pred,
+            tech,
+            news_analysis,
+            valuation,
+            current_price,
+            model=getattr(getattr(sys.modules.get("streamlit"), "session_state", {}), "gpt_model", None) if "streamlit" in sys.modules else None,
+        )
         result["final_analysis"] = final
         result["status"] = "완료"
 
@@ -277,7 +299,7 @@ def run_financial_analysis(stock_code: str, financial_data, current_price: float
         return {}
 
 
-def run_final_analysis(stock_code: str, stock_name: str, analysis_result: dict) -> dict:
+def run_final_analysis(stock_code: str, stock_name: str, analysis_result: dict, model: Optional[str] = None) -> dict:
     """최종 AI 종합 분석만 실행."""
     try:
         logger.info("🔄 AI 종합 분석 시작...")
@@ -291,12 +313,14 @@ def run_final_analysis(stock_code: str, stock_name: str, analysis_result: dict) 
             import streamlit as st
             if hasattr(st.session_state, "price_df") and st.session_state.price_df is not None:
                 current_price = float(st.session_state.price_df["close"].iloc[-1])
+            if model is None:
+                model = getattr(st.session_state, "gpt_model", None)
         except Exception:
             pass
         if current_price is None:
             current_price = 50000
 
-        final = analyze_with_llm(stock_name, lstm_pred, tech, news_analysis, valuation)
+        final = analyze_with_llm(stock_name, lstm_pred, tech, news_analysis, valuation, model=model)
         logger.info("분석 완료: %s", final.get("recommendation", "N/A") if final else "None")
         return final
 
