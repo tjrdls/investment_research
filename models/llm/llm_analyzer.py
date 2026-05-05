@@ -60,20 +60,37 @@ def analyze_with_llm(
 
     today_str = date.today().strftime("%Y년 %m월 %d일")
 
+    lstm_confidence = lstm_result.get("confidence", 0)
+    lstm_pred_label = lstm_result.get("prediction", "")
+    if lstm_confidence >= 0.70:
+        lstm_weight_note = "고신뢰 신호 (confidence {:.0%}) — LSTM 예측을 핵심 근거로 활용하세요.".format(lstm_confidence)
+    elif lstm_confidence >= 0.50:
+        lstm_weight_note = "중간 신뢰 신호 (confidence {:.0%}) — 다른 신호와 교차 확인하세요.".format(lstm_confidence)
+    else:
+        lstm_weight_note = "저신뢰 신호 (confidence {:.0%}) — 기술·뉴스 신호를 우선하세요.".format(lstm_confidence)
+
+    # 신호 충돌 감지
+    lstm_direction = "상승" if lstm_prob_up > lstm_prob_down + 0.1 else ("하락" if lstm_prob_down > lstm_prob_up + 0.1 else "중립")
+    tech_direction = "긍정" if tech_score > 0 else ("부정" if tech_score < 0 else "중립")
+    news_direction = "호재" if "호재" in str(news_verdict) else ("악재" if "악재" in str(news_verdict) else "중립")
+    conflict = (lstm_direction == "상승" and (tech_direction == "부정" or news_direction == "악재")) or \
+               (lstm_direction == "하락" and (tech_direction == "긍정" or news_direction == "호재"))
+    conflict_note = "신호 간 충돌 감지됨 — 보수적 판단을 권장합니다." if conflict else "신호 간 충돌 없음."
+
     prompt = """당신은 한국 주식시장 전문 애널리스트입니다.
 {}
 
 다음 분석 결과를 종합하여 {} 종목에 대한 투자 의견을 제시하세요.
 
-▸ LSTM 기계학습 예측:
+▸ LSTM 기계학습 예측 [{}]:
   - 상승 확률 {:.1%}  하락 확률 {:.1%}
 
-▸ 기술적 지표:
+▸ 기술적 지표 [기술 방향: {}]:
   매수 신호: {}
   주의 신호: {}
   기술 신호 스코어: {}
 
-▸ 뉴스 분석:
+▸ 뉴스 분석 [뉴스 방향: {}]:
   판정: {}
   점수: {:.2f}
 
@@ -81,31 +98,34 @@ def analyze_with_llm(
   PER: {}  PBR: {}  ROE: {}%
   부채비율: {}%
 
-위 모든 정보를 종합하여:
-1. 종목의 현재 상태를 1문장으로 요약
-2. 매수/매도/관망 투자 의견 제시
-3. 주요 리스크 및 기회 각 2‐3개
-4. 목표 시점 및 매매 전략
+▸ 신호 일관성: {}
+
+위 모든 정보를 종합하여 투자 의견을 제시하세요.
+신뢰도가 높은 신호에 더 높은 비중을 두고, 신호 간 충돌이 있으면 반드시 해석 근거를 명시하세요.
 
 반드시 아래 JSON만 출력하세요:
 {{
   "summary": "종목 현재 상태 1문장",
   "recommendation": "매수 강력 추천 / 매수 / 관망 / 매도 / 매도 강력 추천",
+  "signal_interpretation": "각 신호(LSTM·기술·뉴스)를 어떻게 해석하여 결론에 반영했는지 1문장",
+  "conflict_resolution": "신호 간 충돌이 있다면 어떻게 판단했는지, 없으면 null",
   "target_upside": "목표가 상승률 예: +15%",
   "target_downside": "하방 위험 예: -10%",
   "risks": ["리스크1", "리스크2", "리스크3"],
   "opportunities": ["기회1", "기회2"],
   "strategy": "투자 전략 1‐2문장",
-  "confidence": "신뢰도 0~100(%)",
+  "confidence": "신뢰도 0~100",
   "key_watch_points": ["주시사항1", "주시사항2"]
 }}""".format(
         today_str, stock_name,
+        lstm_weight_note,
         lstm_prob_up, lstm_prob_down,
-        signals_str, warnings_str, tech_score,
-        news_verdict, news_score,
+        tech_direction, signals_str, warnings_str, tech_score,
+        news_direction, news_verdict, news_score,
         per, pbr,
         roe if roe != "N/A" else "N/A",
         debt_ratio if debt_ratio != "N/A" else "N/A",
+        conflict_note,
     )
 
     try:
@@ -150,6 +170,13 @@ def format_final_report(stock_name: str, stock_code: str, analysis_result: dict,
     downside = analysis_result.get("target_downside", "N/A")
     if current_price:
         lines.append("  목표: {} / 위험: {}".format(upside, downside))
+
+    sig_interp = analysis_result.get("signal_interpretation")
+    conflict_res = analysis_result.get("conflict_resolution")
+    if sig_interp:
+        lines += ["▸ 신호 해석:", "  {}".format(sig_interp)]
+    if conflict_res:
+        lines += ["▸ 충돌 해소:", "  {}".format(conflict_res)]
 
     lines.append("")
 

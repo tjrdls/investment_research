@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
-역할: LSTM 모델 학습 스크립트
-여러 종목의 데이터를 수집하여 멀티모달 LSTM 모델을 학습한다.
+역할: LSTM 모델 학습 스크립트 (Late Fusion 구조)
+기술지표 시퀀스만으로 학습한다. 텍스트 임베딩은 LLM 단계에서 별도 활용.
 """
 
 import logging
@@ -19,16 +19,13 @@ configure_root_logger()
 
 from config import MODEL_PATH, LSTM_SEQ_LEN, LSTM_PRED_DAYS, LSTM_THRESHOLD
 from data_loader.price.data_collector import collect_price_data
-from data_loader.financial.financial_collector import get_corp_code_map
 from analysis.indicators.technical_indicators import calculate_indicators
-from models.lstm.lstm_model import MultimodalStockPredictor, prepare_dataset, train_model, StockDataset
-from pipeline.prediction_pipeline import get_text_embedding
+from models.lstm.lstm_model import StockPredictor, prepare_dataset, train_model, StockDataset, evaluate_model
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 logger = logging.getLogger(__name__)
 
-# 학습용 종목 (상위 10개)
 TRAIN_STOCKS = [
     ("005930", "삼성전자"),
     ("000660", "SK하이닉스"),
@@ -43,15 +40,13 @@ TRAIN_STOCKS = [
 ]
 
 
-def collect_training_data() -> tuple:
+def collect_training_data() -> dict:
     """
-    여러 종목의 학습용 데이터 수집.
+    여러 종목의 학습용 가격·기술지표 데이터 수집.
 
-    :return: (price_data dict, text_embeddings dict)
+    :return: {stock_code: indicators_df}
     """
     price_data: dict = {}
-    text_embeddings: dict = {}
-    get_corp_code_map()  # 기업코드 캐시 warming
 
     logger.info("=" * 60)
     logger.info("📊 LSTM 학습용 데이터 수집")
@@ -71,23 +66,22 @@ def collect_training_data() -> tuple:
                 continue
 
             price_data[stock_code] = indicators_df
-            text_embeddings[stock_code] = get_text_embedding(stock_name)
             logger.info("✅ %d 거래일 확보", len(indicators_df))
 
         except Exception as e:
             logger.error("❌ 오류 [%s]: %s", stock_code, e)
 
     logger.info("📦 총 %d 종목 데이터 확보", len(price_data))
-    return price_data, text_embeddings
+    return price_data
 
 
 def train_lstm() -> bool:
     """LSTM 모델 학습."""
     logger.info("=" * 60)
-    logger.info("🤖 LSTM 모델 학습 시작")
+    logger.info("🤖 LSTM 모델 학습 시작 (Late Fusion)")
     logger.info("=" * 60)
 
-    price_data, text_embeddings = collect_training_data()
+    price_data = collect_training_data()
 
     if len(price_data) < 2:
         logger.error("학습용 데이터 부족 (최소 2개 종목 필요)")
@@ -95,8 +89,8 @@ def train_lstm() -> bool:
 
     logger.info("📦 데이터셋 준비 중...")
     try:
-        X_seq, X_txt, Y, _ = prepare_dataset(
-            price_data, text_embeddings,
+        X_seq, Y, _ = prepare_dataset(
+            price_data,
             seq_len=LSTM_SEQ_LEN, pred_days=LSTM_PRED_DAYS, threshold=LSTM_THRESHOLD,
         )
         logger.info("✅ 학습 샘플: %d", len(X_seq))
@@ -104,18 +98,25 @@ def train_lstm() -> bool:
         logger.error("데이터셋 준비 실패: %s", e)
         return False
 
-    split_idx = int(len(X_seq) * 0.8)
+    n = len(X_seq)
+    train_end = int(n * 0.70)
+    val_end = int(n * 0.85)
     train_loader = DataLoader(
-        StockDataset(X_seq[:split_idx], X_txt[:split_idx], Y[:split_idx]),
+        StockDataset(X_seq[:train_end], Y[:train_end]),
         batch_size=32, shuffle=True,
     )
     val_loader = DataLoader(
-        StockDataset(X_seq[split_idx:], X_txt[split_idx:], Y[split_idx:]),
+        StockDataset(X_seq[train_end:val_end], Y[train_end:val_end]),
         batch_size=32, shuffle=False,
     )
-    logger.info("학습 샘플: %d  검증 샘플: %d", len(train_loader.dataset), len(val_loader.dataset))
+    test_loader = DataLoader(
+        StockDataset(X_seq[val_end:], Y[val_end:]),
+        batch_size=32, shuffle=False,
+    )
+    logger.info("학습: %d  검증: %d  테스트: %d",
+                len(train_loader.dataset), len(val_loader.dataset), len(test_loader.dataset))
 
-    model = MultimodalStockPredictor().to(DEVICE)
+    model = StockPredictor().to(DEVICE)
     logger.info("모델 생성 완료 (Device: %s, 파라미터: %s개)",
                 DEVICE, f"{sum(p.numel() for p in model.parameters()):,}")
 
@@ -127,6 +128,13 @@ def train_lstm() -> bool:
     if history["val_acc"]:
         logger.info("최고 검증 정확도: %.2f%%  최저 검증 손실: %.4f",
                     max(history["val_acc"]) * 100, min(history["val_loss"]))
+
+    logger.info("=" * 60)
+    logger.info("📊 Test Set 최종 평가")
+    logger.info("=" * 60)
+    test_result = evaluate_model(model, test_loader)
+    logger.info("테스트 정확도: %.2f%%", test_result["accuracy"] * 100)
+    logger.info("\n%s", test_result["report"])
 
     return True
 

@@ -83,6 +83,64 @@ def dart_api_call(endpoint, params):
         return {"status": "999", "message": str(e)}
 
 
+def find_available_reports(corp_code: str, year_range: int = 2) -> list:
+    """
+    DART 공시 목록 API로 실제 제출된 정기보고서 목록 조회.
+    존재하지 않는 보고서 요청을 방지하기 위해 collect_financial_data에서 사용.
+
+    :return: [(year, reprt_code, title), ...]
+    """
+    from datetime import datetime
+    current_year = datetime.now().year
+    bgn_de = "{}0101".format(current_year - year_range)
+
+    data = dart_api_call("list.json", {
+        "corp_code": corp_code,
+        "bgn_de": bgn_de,
+        "pblntf_ty": "A",
+        "page_count": 40,
+    })
+
+    if data.get("status") != "000":
+        return []
+
+    reprt_map = {
+        "사업보고서": "11011",
+        "반기보고서": "11012",
+        "분기보고서(1분기)": "11013",
+        "분기보고서(3분기)": "11014",
+    }
+
+    reports = []
+    for item in data.get("list", []):
+        title = item.get("report_nm", "")
+        rcept_dt = item.get("rcept_dt", "")
+        year = int(rcept_dt[:4]) if rcept_dt and len(rcept_dt) >= 4 else None
+        if not year:
+            continue
+        for key, code in reprt_map.items():
+            if key in title:
+                reports.append((year, code, title))
+                break
+
+    return reports
+
+
+def get_recent_disclosures(corp_code: str, n: int = 5) -> list:
+    """
+    최근 공시 제목 목록 조회. 임베딩 컨텍스트에 포함해 LLM 판단 품질을 높인다.
+
+    :return: [공시제목, ...]
+    """
+    data = dart_api_call("list.json", {
+        "corp_code": corp_code,
+        "page_count": n,
+    })
+    if data.get("status") != "000":
+        return []
+    return [item.get("report_nm", "") for item in data.get("list", [])[:n] if item.get("report_nm")]
+
+
 def get_financial_statements(corp_code, year, reprt_code="11011"):
     """
     재무제표 수집 (DART fnlttSinglAcntAll)
@@ -134,7 +192,17 @@ def get_financial_statements(corp_code, year, reprt_code="11011"):
         "total_equity": find_value(equity_keys, items),
         "total_debt": find_value(debt_keys, items),
     }
-    
+
+    # 연결재무제표에서 당기순이익이 0으로 잡히는 경우 지배주주지분으로 fallback
+    if result["net_income"] == 0.0:
+        parent_keys = [
+            "지배주주지분 당기순이익", "지배기업 소유주지분 당기순이익",
+            "지배기업소유주지분당기순이익", "지배주주에 귀속되는 당기순이익",
+        ]
+        fallback = find_value(parent_keys, items)
+        if fallback:
+            result["net_income"] = fallback
+
     return result
 
 
@@ -181,41 +249,50 @@ def collect_financial_data(stock_code, corp_code, year_range=2):
     records = []
     
     try:
-        from datetime import datetime
-        current_year = datetime.now().year
-        
-        for year in range(current_year - year_range, current_year + 1):
-            for reprt_code, label in [("11011", "연간"), ("11012", "반기")]:
-                fin = get_financial_statements(corp_code, year, reprt_code)
-                
-                if not fin or fin.get("revenue", 0) == 0:
-                    continue
-                
-                shares = get_stock_count(corp_code, year, reprt_code)
-                time.sleep(0.3)
-                
-                # TTM 지표 계산
-                eps = (fin["net_income"] / shares) if shares and shares > 0 else 0
-                bps = (fin["total_equity"] / shares) if shares and shares > 0 else 0
-                roe = (fin["net_income"] / fin["total_equity"] * 100) if fin["total_equity"] > 0 else 0
-                debt_ratio = (fin["total_debt"] / fin["total_equity"] * 100) if fin["total_equity"] > 0 else 0
-                
-                records.append({
-                    "year": year,
-                    "report_type": label,
-                    "revenue": fin["revenue"],
-                    "operating_income": fin["operating_income"],
-                    "net_income": fin["net_income"],
-                    "total_equity": fin["total_equity"],
-                    "total_debt": fin["total_debt"],
-                    "shares": shares or 0,
-                    "eps": eps,
-                    "bps": bps,
-                    "roe": roe,
-                    "debt_ratio": debt_ratio
-                })
-                
-                time.sleep(0.3)
+        label_map = {"11011": "연간", "11012": "반기", "11013": "1분기", "11014": "3분기"}
+
+        available = find_available_reports(corp_code, year_range)
+        if not available:
+            # DART list API가 실패하면 고정 루프로 fallback
+            from datetime import datetime
+            current_year = datetime.now().year
+            available = [
+                (y, code, label)
+                for y in range(current_year - year_range, current_year + 1)
+                for code, label in [("11011", "연간"), ("11012", "반기")]
+            ]
+
+        for year, reprt_code, _title in available:
+            label = label_map.get(reprt_code, reprt_code)
+            fin = get_financial_statements(corp_code, year, reprt_code)
+
+            if not fin or fin.get("revenue", 0) == 0:
+                continue
+
+            shares = get_stock_count(corp_code, year, reprt_code)
+            time.sleep(0.3)
+
+            eps = (fin["net_income"] / shares) if shares and shares > 0 else 0
+            bps = (fin["total_equity"] / shares) if shares and shares > 0 else 0
+            roe = (fin["net_income"] / fin["total_equity"] * 100) if fin["total_equity"] > 0 else 0
+            debt_ratio = (fin["total_debt"] / fin["total_equity"] * 100) if fin["total_equity"] > 0 else 0
+
+            records.append({
+                "year": year,
+                "report_type": label,
+                "revenue": fin["revenue"],
+                "operating_income": fin["operating_income"],
+                "net_income": fin["net_income"],
+                "total_equity": fin["total_equity"],
+                "total_debt": fin["total_debt"],
+                "shares": shares or 0,
+                "eps": eps,
+                "bps": bps,
+                "roe": roe,
+                "debt_ratio": debt_ratio
+            })
+
+            time.sleep(0.3)
         
         if not records:
             logger.warning("재무제표 데이터 없음: %s", stock_code)

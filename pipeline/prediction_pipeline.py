@@ -19,11 +19,11 @@ from config import (
     EMBEDDING_MODEL, EMBEDDING_DIM, STOCK_CODE_TO_NAME,
 )
 from data_loader.price.data_collector import collect_price_data, get_top_stocks
-from data_loader.financial.financial_collector import collect_financial_data, get_corp_code_map
+from data_loader.financial.financial_collector import collect_financial_data, get_corp_code_map, get_recent_disclosures
 from analysis.indicators.technical_indicators import calculate_indicators, get_technical_signals
 from analysis.news_analyzer import collect_stock_news, collect_macro_news, analyze_news_with_gpt
 from analysis.valuation_analyzer import calculate_ttm_metrics
-from models.lstm.lstm_model import predict_next_trend, MultimodalStockPredictor
+from models.lstm.lstm_model import predict_next_trend, StockPredictor
 from models.llm.llm_analyzer import analyze_with_llm, format_final_report
 from openai import OpenAI
 from dotenv import load_dotenv
@@ -63,7 +63,7 @@ def load_lstm_model():
 
     try:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        model = MultimodalStockPredictor().to(device)
+        model = StockPredictor().to(device)
         model.load_state_dict(torch.load(MODEL_PATH, map_location=device))
         model.eval()
         logger.info("✅ LSTM 모델 로드 완료")
@@ -73,8 +73,8 @@ def load_lstm_model():
         return None
 
 
-def build_context_text(stock_name: str, financial_df) -> str:
-    """DART 재무 정보로 Embedding용 컨텍스트 텍스트 구성."""
+def build_context_text(stock_name: str, financial_df, disclosures: list = None) -> str:
+    """DART 재무 정보 + 최근 공시 목록으로 Embedding용 컨텍스트 텍스트 구성."""
     if financial_df is None or financial_df.empty:
         return "{} 코스피 상장 주식".format(stock_name)
 
@@ -86,6 +86,10 @@ def build_context_text(stock_name: str, financial_df) -> str:
         parts.append("[{}년 {}] 매출 {:.0f}억 순이익 {:.0f}억 ROE {:.1f}%".format(
             int(row.get("year", 2025)), row.get("report_type", ""), rev, net, roe
         ))
+
+    if disclosures:
+        parts.append("최근공시: " + " | ".join(disclosures[:5]))
+
     return " | ".join(parts)[:4000]
 
 
@@ -111,34 +115,35 @@ def _step_price(stock_code: str) -> tuple:
     return price_df, indicators_df, current_price, tech
 
 
-def _step_financial(stock_code: str):
-    """[3] DART 재무 데이터 수집. financial_df(또는 None) 반환."""
+def _step_financial(stock_code: str) -> tuple:
+    """[3] DART 재무 데이터 + 최근 공시 목록 수집. (financial_df, disclosures) 반환."""
     logger.info("[3/6] 재무 데이터 수집 (DART)...")
     corp_map = get_corp_code_map()
     corp_code = corp_map.get(stock_code, {}).get("corp_code")
     if not corp_code:
         logger.warning("기업코드 없음 — 재무 단계 스킵")
-        return None
+        return None, []
     financial_df = collect_financial_data(stock_code, corp_code)
-    logger.info("✅ 완료 (%d 기간)", len(financial_df))
-    return financial_df
+    disclosures = get_recent_disclosures(corp_code, n=5)
+    logger.info("✅ 완료 (%d 기간, 공시 %d건)", len(financial_df), len(disclosures))
+    return financial_df, disclosures
 
 
-def _step_embedding(stock_name: str, financial_df) -> np.ndarray:
-    """[4] 텍스트 임베딩 생성."""
+def _step_embedding(stock_name: str, financial_df, disclosures: list = None) -> np.ndarray:
+    """[4] 텍스트 임베딩 생성 (재무 수치 + 최근 공시 컨텍스트 포함)."""
     logger.info("[4/6] 텍스트 임베딩 생성...")
-    context = build_context_text(stock_name, financial_df)
+    context = build_context_text(stock_name, financial_df, disclosures)
     emb = get_text_embedding(context)
     logger.info("✅ 완료 (%d 차원)", len(emb))
     return emb
 
 
-def _step_lstm(indicators_df, text_emb: np.ndarray) -> dict:
-    """[5] LSTM 예측."""
+def _step_lstm(indicators_df) -> dict:
+    """[5] LSTM 예측 (기술지표 시퀀스만 사용 — Late Fusion)."""
     logger.info("[5/6] LSTM 예측...")
     try:
         model = load_lstm_model()
-        result = predict_next_trend(model, indicators_df, text_emb, seq_len=SEQ_LEN)
+        result = predict_next_trend(model, indicators_df, seq_len=SEQ_LEN)
         logger.info("✅ %s: 신뢰도 %.1f%%", result["prediction"], result["confidence"] * 100)
         return result
     except Exception as e:
@@ -146,12 +151,12 @@ def _step_lstm(indicators_df, text_emb: np.ndarray) -> dict:
         return {"prediction": "기술 오류", "probabilities": {"상승": 0.33, "하락": 0.33, "횡보": 0.34}, "confidence": 0.0}
 
 
-def _step_news(stock_name: str, stock_code: str, model: Optional[str] = None) -> tuple:
+def _step_news(stock_name: str, stock_code: str) -> tuple:
     """[6] 뉴스 수집 + GPT 감성 분석. (news_meta, news_analysis) 반환."""
     logger.info("[6/6] 뉴스 분석...")
     stock_news = collect_stock_news(stock_name, [stock_name, "{}({})".format(stock_name, stock_code)])
     macro_news = collect_macro_news()
-    analysis = analyze_news_with_gpt(stock_name, stock_news, macro_news, model=model)
+    analysis = analyze_news_with_gpt(stock_name, stock_news, macro_news)
     if analysis:
         logger.info("✅ %s: %s", analysis.get("verdict", "중립"), analysis.get("recommendation", "관망"))
     else:
@@ -169,19 +174,11 @@ def _step_valuation(financial_df, current_price: float) -> dict:
     return metrics
 
 
-def _step_llm(
-    stock_name: str,
-    stock_code: str,
-    lstm_pred: dict,
-    tech: dict,
-    news_analysis,
-    valuation: dict,
-    current_price: float,
-    model: Optional[str] = None,
-) -> dict | None:
+def _step_llm(stock_name: str, stock_code: str, lstm_pred: dict,
+              tech: dict, news_analysis, valuation: dict, current_price: float) -> dict | None:
     """[8] 최종 LLM 종합 분석."""
     logger.info("[8/6] 최종 LLM 분석...")
-    final = analyze_with_llm(stock_name, lstm_pred, tech, news_analysis, valuation, model=model)
+    final = analyze_with_llm(stock_name, lstm_pred, tech, news_analysis, valuation)
     if final:
         logger.info("✅ %s", final.get("recommendation", "관망"))
         report = format_final_report(stock_name, stock_code, final, current_price)
@@ -211,37 +208,24 @@ def run_single_stock_analysis(stock_code: str, stock_name: str) -> dict:
         result["current_price"] = current_price
         result["technical"] = tech
 
-        financial_df = _step_financial(stock_code)
+        financial_df, disclosures = _step_financial(stock_code)
         result["financial"] = financial_df.to_dict() if financial_df is not None else {}
 
-        text_emb = _step_embedding(stock_name, financial_df)
+        text_emb = _step_embedding(stock_name, financial_df, disclosures)
         result["text_embedding"] = text_emb.tolist()
 
-        lstm_pred = _step_lstm(indicators_df, text_emb)
+        lstm_pred = _step_lstm(indicators_df)
         result["lstm_prediction"] = lstm_pred
         time.sleep(0.5)
 
-        news_meta, news_analysis = _step_news(
-            stock_name,
-            stock_code,
-            model=getattr(getattr(sys.modules.get("streamlit"), "session_state", {}), "gpt_model", None) if "streamlit" in sys.modules else None,
-        )
+        news_meta, news_analysis = _step_news(stock_name, stock_code)
         result["news"] = news_meta
         time.sleep(1)
 
         valuation = _step_valuation(financial_df, current_price)
         result["valuation"] = valuation
 
-        final = _step_llm(
-            stock_name,
-            stock_code,
-            lstm_pred,
-            tech,
-            news_analysis,
-            valuation,
-            current_price,
-            model=getattr(getattr(sys.modules.get("streamlit"), "session_state", {}), "gpt_model", None) if "streamlit" in sys.modules else None,
-        )
+        final = _step_llm(stock_name, stock_code, lstm_pred, tech, news_analysis, valuation, current_price)
         result["final_analysis"] = final
         result["status"] = "완료"
 
@@ -278,11 +262,10 @@ def run_batch_analysis(top_n: int = 5) -> list:
 
 
 def run_lstm_prediction(price_df, indicators_df, text_embedding=None) -> dict:
-    """LSTM 예측만 실행."""
+    """LSTM 예측만 실행 (text_embedding은 하위 호환성 유지용, 사용하지 않음)."""
     try:
         model = load_lstm_model()
-        emb = text_embedding if text_embedding is not None else np.zeros(EMBEDDING_DIM)
-        return predict_next_trend(model, indicators_df, emb, seq_len=SEQ_LEN)
+        return predict_next_trend(model, indicators_df, seq_len=SEQ_LEN)
     except Exception as e:
         logger.error("LSTM 예측 실패: %s", e)
         return {"prediction": "기술 오류", "probabilities": {"상승": 0.33, "하락": 0.33, "횡보": 0.34}, "confidence": 0.0}
@@ -299,7 +282,7 @@ def run_financial_analysis(stock_code: str, financial_data, current_price: float
         return {}
 
 
-def run_final_analysis(stock_code: str, stock_name: str, analysis_result: dict, model: Optional[str] = None) -> dict:
+def run_final_analysis(stock_code: str, stock_name: str, analysis_result: dict) -> dict:
     """최종 AI 종합 분석만 실행."""
     try:
         logger.info("🔄 AI 종합 분석 시작...")
@@ -313,14 +296,12 @@ def run_final_analysis(stock_code: str, stock_name: str, analysis_result: dict, 
             import streamlit as st
             if hasattr(st.session_state, "price_df") and st.session_state.price_df is not None:
                 current_price = float(st.session_state.price_df["close"].iloc[-1])
-            if model is None:
-                model = getattr(st.session_state, "gpt_model", None)
         except Exception:
             pass
         if current_price is None:
             current_price = 50000
 
-        final = analyze_with_llm(stock_name, lstm_pred, tech, news_analysis, valuation, model=model)
+        final = analyze_with_llm(stock_name, lstm_pred, tech, news_analysis, valuation)
         logger.info("분석 완료: %s", final.get("recommendation", "N/A") if final else "None")
         return final
 
