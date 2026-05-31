@@ -101,7 +101,8 @@ class Recommender:
                     LEFT JOIN latest_per p ON p.ticker = t.ticker
                     WHERE c.market_cap >= ?
                 """, conn, params=[as_of, as_of, as_of, hf.market_cap_min_krw])
-            except sqlite3.OperationalError as e:
+            except (sqlite3.OperationalError, pd.errors.DatabaseError) as e:
+                # pandas 는 sqlite3.OperationalError 를 DatabaseError 로 감싸므로 둘 다 처리
                 logger.warning("PER 테이블 없음 — PER 필터 생략: %s", e)
                 df = pd.read_sql_query("""
                     WITH latest_cap AS (

@@ -119,6 +119,55 @@ class DataConfig:
     pykrx_request_sleep: float = 0.15
     pykrx_retry: int = 3
 
+    # KRX OpenAPI (data-dbg.krx.co.kr) — 인증키(KRX_AUTH_KEY)로 호출하는 공식 REST API.
+    # pykrx 사이트 로그인 게이트 우회용. 인증키는 코드가 아니라 os.getenv("KRX_AUTH_KEY") 로 로드.
+    krx_api_base: str = "http://data-dbg.krx.co.kr/svc/apis"
+    krx_api_sleep: float = 0.2          # 요청 간 간격(초)
+    krx_api_retry: int = 3
+    krx_api_daily_limit: int = 10000    # KRX OpenAPI 일일 호출 제한
+
+
+# ============================================================
+# 9. LLM / 멀티모달 (뉴스·밸류에이션·내러티브)
+# ============================================================
+@dataclass
+class LLMConfig:
+    """OpenAI 기반 모달리티 설정. 키가 없으면 자동으로 비활성처럼 동작한다."""
+    enabled: bool = True               # False 면 GPT 호출을 모두 건너뜀
+    gpt_model: str = "gpt-5.4-nano"    # 뉴스 감성·밸류에이션·내러티브 기본 모델
+    embedding_model: str = "text-embedding-3-small"
+    embedding_dim: int = 1536
+    temperature: float = 0.1
+    max_tokens_news: int = 500
+    max_tokens_analysis: int = 800
+    max_tokens_valuation: int = 300
+
+
+# ============================================================
+# 10. 멀티모달 Late Fusion 가중치
+# ============================================================
+@dataclass
+class FusionWeights:
+    """모달리티별 융합 가중치 (단일 종목 멀티모달 분석용).
+
+    포트폴리오 스크리닝의 ai_weight(=0.2) 와는 별개 — 이건 '한 종목을
+    여러 모달리티로 해석'할 때 쓴다. 합이 1 이 아니어도 자동 정규화된다.
+    """
+    fundamental: float = 0.40
+    chart: float = 0.25
+    macro: float = 0.15
+    valuation: float = 0.10
+    news: float = 0.10
+
+    def as_dict(self) -> dict:
+        return {
+            "fundamental": self.fundamental,
+            "chart": self.chart,
+            "macro": self.macro,
+            "valuation": self.valuation,
+            "news": self.news,
+        }
+
 
 # ============================================================
 # 통합 설정
@@ -132,6 +181,8 @@ class Config:
     train: TrainConfig = field(default_factory=TrainConfig)
     backtest: BacktestConfig = field(default_factory=BacktestConfig)
     data: DataConfig = field(default_factory=DataConfig)
+    llm: LLMConfig = field(default_factory=LLMConfig)
+    fusion: FusionWeights = field(default_factory=FusionWeights)
 
 
 CFG = Config()

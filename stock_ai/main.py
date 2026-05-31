@@ -41,21 +41,23 @@ logging.getLogger("pykrx").setLevel(logging.WARNING)
 
 
 def _check_krx_credentials():
-    """KRX 로그인 정보 확인. 없으면 명확한 안내."""
-    if not os.environ.get("KRX_ID") or not os.environ.get("KRX_PW"):
-        print("\n" + "!" * 70)
-        print("⚠ KRX 로그인 정보가 없습니다 (2025-12-27부터 KRX는 회원제)")
-        print("!" * 70)
-        print("해결:")
-        print("  1. https://data.krx.co.kr 접속 → 우상단 '회원가입'")
-        print("     (OpenAPI 키 신청 X, 일반 회원가입만 — 즉시 가능)")
-        print("  2. 가입 완료 후, .env 파일에 다음 추가:")
-        print("       KRX_ID=가입한_아이디")
-        print("       KRX_PW=가입한_비밀번호")
-        print("  3. pykrx 최신 버전 확인: pip install --upgrade pykrx")
-        print("!" * 70 + "\n")
-        return False
-    return True
+    """KRX OpenAPI 인증키 확인. 없으면 명확한 안내."""
+    if os.environ.get("KRX_AUTH_KEY"):
+        return True
+    # 레거시: KRX_ID/PW 도 허용 (단, pykrx 사이트 로그인은 현재 게이트로 불안정)
+    if os.environ.get("KRX_ID") and os.environ.get("KRX_PW"):
+        return True
+    print("\n" + "!" * 70)
+    print("⚠ KRX 인증 정보가 없습니다")
+    print("!" * 70)
+    print("해결 (권장 — KRX OpenAPI 인증키):")
+    print("  1. https://openapi.krx.co.kr 접속 → 로그인 → 인증키 신청")
+    print("  2. MyPage 에서 사용할 API '활용신청' → 승인 (보통 1일 내, 이메일 통지)")
+    print("     · 유가증권 일별매매정보 (sto/stk_bydd_trd)")
+    print("     · 코스닥 일별매매정보 (sto/ksq_bydd_trd)")
+    print("  3. .env 파일에 추가:  KRX_AUTH_KEY=발급받은_인증키")
+    print("!" * 70 + "\n")
+    return False
 
 
 def _filter_pykrx_noise(record: logging.LogRecord) -> bool:
@@ -77,17 +79,49 @@ for handler in logging.root.handlers:
 # 1. PYKRX 데이터 수집
 # ============================================================
 def cmd_collect(args: argparse.Namespace) -> None:
-    from src.data.pykrx_loader import PyKrxLoader
+    """KRX OpenAPI 로 OHLCV + 시총 + 유니버스를 날짜-bulk 로 수집 (cache.db 생성).
 
+    --legacy-pykrx 지정 시 옛 pykrx 종목별 수집 경로 사용 (사이트 로그인 필요).
+    """
     if not _check_krx_credentials():
         return
 
-    loader = PyKrxLoader()
-    print(">>> [1/2] 종목 유니버스 갱신 (KOSPI + KOSDAQ)")
-    loader.update_universe(anchor=args.end_date)
-    print(">>> [2/2] OHLCV + 시총 수집 (수 시간 소요 가능)")
-    stats = loader.collect_all(start=args.start, end=args.end_date)
-    print(f"\n완료: {stats}")
+    if getattr(args, "legacy_pykrx", False):
+        from src.data.pykrx_loader import PyKrxLoader
+        loader = PyKrxLoader()
+        print(">>> [1/2] 종목 유니버스 갱신 (KOSPI + KOSDAQ)")
+        loader.update_universe(anchor=args.end_date)
+        print(">>> [2/2] OHLCV + 시총 수집 (수 시간 소요 가능)")
+        stats = loader.collect_all(start=args.start, end=args.end_date)
+        print(f"\n완료: {stats}")
+        return
+
+    from src.data.krx_openapi_loader import KrxOpenApiLoader
+    from src.data.daily_update import _backfill_etfs
+
+    loader = KrxOpenApiLoader()
+    print(">>> [1/2] 주식 OHLCV + 시총 + 유니버스 수집 (KRX OpenAPI, 날짜-bulk)")
+    res = loader.collect_range(args.start, args.end_date)
+    if not res.get("ok"):
+        err = res.get("error", "")
+        print(f"\n⚠ 수집 중단: {err}")
+        if "401" in str(err) or "승인" in str(err):
+            print("\n" + "─" * 64)
+            print("  아직 KRX OpenAPI 승인 전입니다. 두 가지 방법:")
+            print("  1) 승인 상태 확인:  python check_krx_api.py")
+            print("  2) 승인 전 임시 데이터로 먼저 돌려보기:")
+            print("       python main.py seed          # 하드코딩 우량주 26개 (KRX 인증 불필요)")
+            print("       python main.py collect-dart  # 재무 수집")
+            print("       python main.py recommend     # 추천 / dashboard")
+            print("  → 승인되면 그때 python main.py collect 로 전종목 교체")
+            print("─" * 64)
+        return
+    print(f"    주식: {res['days_added']}거래일 · OHLCV {res['ohlcv_rows']:,}행 · "
+          f"시총 {res['cap_rows']:,}행 · API {res.get('api_calls')}회")
+    print(">>> [2/2] 벤치마크/금헤지 ETF 수집 (pykrx 종목별)")
+    etf = _backfill_etfs(res.get("from"), res.get("to"))
+    print(f"    ETF: {etf:,}행 ({', '.join(['069500', '132030'])})")
+    print(f"\n완료: {res['from']} ~ {res['to']} ({res['elapsed_sec']:.0f}초)")
 
 
 # ============================================================
@@ -178,6 +212,40 @@ def cmd_collect_dart(args: argparse.Namespace) -> None:
     print(">>> [3/3] 펀더멘털 지표 계산 (ROE, 성장률 등)")
     dart.compute_fundamentals()
     print("✓ DART 수집 완료")
+
+
+# ============================================================
+# 2-B. 시드 수집 (KRX OpenAPI 승인 전 임시 — 하드코딩 소수 종목)
+# ============================================================
+def cmd_seed(args: argparse.Namespace) -> None:
+    """KRX OpenAPI 승인 전, 하드코딩 우량주만으로 cache.db 적재 (KRX 인증 불필요).
+
+    OHLCV=pykrx 종목별, 상장주식수=yfinance, 시총=종가×주식수. 이후 collect-dart 연결 가능.
+    """
+    from src.data.seed_loader import SEED_UNIVERSE, SeedLoader, _yesterday
+    from src.data.daily_update import _backfill_etfs
+
+    end = args.end_date or _yesterday().strftime("%Y-%m-%d")
+    n_uni = len(SEED_UNIVERSE)
+    print(f">>> [1/2] 시드 종목 OHLCV + 시총 적재 ({n_uni}종목, KRX 인증 불필요)")
+    print(f"    소스: pykrx OHLCV + yfinance 상장주식수 · {args.start} ~ {end}")
+    loader = SeedLoader()
+    stats = loader.collect(start=args.start, end=end)
+    print(f"    종목 {stats['tickers']}/{n_uni} · OHLCV {stats['ohlcv_rows']:,}행 · "
+          f"시총 {stats['cap_rows']:,}행")
+    if stats["no_shares"]:
+        print(f"    ⚠ 상장주식수 미확보(시총 없음): {', '.join(stats['no_shares'])}")
+    if stats["failed"]:
+        print(f"    ⚠ 수집 실패: {', '.join(stats['failed'])}")
+
+    print(">>> [2/2] 벤치마크/금헤지 ETF 적재 (069500, 132030)")
+    etf = _backfill_etfs(args.start, end)
+    print(f"    ETF: {etf:,}행")
+
+    print(f"\n완료 ({stats['elapsed_sec']:.0f}초). 다음 단계:")
+    print("    python main.py collect-dart      # 재무 수집 (시드 유니버스 대상)")
+    print("    python main.py recommend         # 추천 실행")
+    print("\n  ※ KRX OpenAPI 승인되면: python main.py collect 로 전종목 교체")
 
 
 # ============================================================
@@ -330,11 +398,46 @@ def cmd_backtest(args: argparse.Namespace) -> None:
             print(yr.to_string(index=False))
 
     if args.strategy == "ensemble":
-        # 앙상블: 규칙 + 차트 AI
-        from src.recommend.ensemble import run_ensemble_backtest
-        from src.config import MODEL_DIR
+        # 앙상블: 규칙 + LGBM Hybrid (v3+v4) — README production. 동봉 모델, 학습 불필요.
+        from src.backtest.rebalance import run_rule_based_backtest
         print("\n" + "="*70)
-        print(f"🤖 앙상블 백테스트 (규칙 {(1-args.ai_weight)*100:.0f}% + 차트 AI {args.ai_weight*100:.0f}%)")
+        print(f"🤖 LGBM Hybrid 앙상블 백테스트 (규칙 {(1-args.ai_weight)*100:.0f}% + AI {args.ai_weight*100:.0f}%)")
+        print("="*70)
+        try:
+            result = run_rule_based_backtest(
+                start_year=args.start_year,
+                end_year=args.end_year,
+                top_n=args.top_n,
+                weight_scheme=args.weight,
+                replacement_rule=args.replacement,
+                score_diff_pct=args.score_diff_pct,
+                market_split=args.market_split,
+                trend_filter=args.trend_filter,
+                period_months=args.period_months,
+                trend_stop_loss=args.trend_stop_loss,
+                trend_bonus=args.trend_bonus,
+                market_cap_min=args.market_cap_min,
+                market_cap_percentile=args.market_cap_percentile,
+                market_ratio=args.market_ratio,
+                ai_weight=args.ai_weight,        # ★ LGBM 앙상블 활성화
+            )
+            print(result.summary())
+            if not result.yearly.empty:
+                print("\n[연도별 수익률]")
+                yr = result.yearly.copy()
+                for c in ("portfolio_return", "benchmark_return", "alpha"):
+                    yr[c] = (yr[c] * 100).round(2).astype(str) + "%"
+                print(yr.to_string(index=False))
+        except FileNotFoundError as e:
+            print(f"\n⚠ LGBM 모델 없음: {e}")
+            print("  → data/models/trend_lgbm_v3.txt · v4.txt 확인 (동봉됨)")
+        return
+
+    if args.strategy == "chart-lstm":
+        # (레거시) 차트 ChartLSTM 앙상블 — train-chart 로 학습된 chart_lstm.pt 필요
+        from src.recommend.ensemble import run_ensemble_backtest
+        print("\n" + "="*70)
+        print(f"🤖 (레거시) ChartLSTM 앙상블 (규칙 {(1-args.ai_weight)*100:.0f}% + 차트 AI {args.ai_weight*100:.0f}%)")
         if args.model_path:
             print(f"   모델: {args.model_path}")
         print("="*70)
@@ -436,12 +539,73 @@ def cmd_screen(args: argparse.Namespace) -> None:
 
 
 # ============================================================
+# 6-3. 단일 종목 멀티모달 분석 (★ 멀티모달 병합)
+# ============================================================
+def cmd_analyze(args: argparse.Namespace) -> None:
+    """단일 종목을 5개 모달리티(차트·펀더·밸류·뉴스·매크로)로 분석·융합.
+
+    데이터/키가 없는 모달리티는 자동 제외되고 나머지로 진행한다.
+    """
+    from src.modality.analyzer import MultimodalAnalyzer
+
+    ticker = args.ticker
+    name = args.name
+    if not name:
+        # DB 또는 config 에서 종목명 조회 시도
+        try:
+            import sqlite3
+            from src.config import DB_PATH
+            with sqlite3.connect(DB_PATH) as c:
+                row = c.execute("SELECT name FROM tickers WHERE ticker=?", (ticker,)).fetchone()
+                name = row[0] if row else ticker
+        except Exception:
+            name = ticker
+
+    analyzer = MultimodalAnalyzer(ai_weight=args.ai_weight)
+    out = analyzer.analyze(ticker, name, as_of=args.date)
+    print("\n" + out["report"])
+
+    fusion = out["fusion"]
+    if fusion.skipped:
+        print(f"\n(데이터/키 부재로 제외된 모달리티: {', '.join(fusion.skipped)})")
+    print(f"기여도: " + ", ".join(f"{k} {v*100:.0f}%" for k, v in fusion.contributions.items()))
+
+
+# ============================================================
 # 7. 대시보드
 # ============================================================
+def cmd_train_fusion(args: argparse.Namespace) -> None:
+    """학습된 Late Fusion 게이트 학습 (옵션). 기본 가중평균 fusion 은 그대로 유지."""
+    from src.modality.fusion_dataset import build_samples, month_grid
+    from src.modality.learned_fusion import LearnedFusion, DEFAULT_GATE_PATH
+
+    dates = month_grid(args.start, args.end, day=args.day)
+    print(f">>> [1/2] 학습 샘플 생성 ({len(dates)}개 시점, horizon {args.horizon}거래일)")
+    print("    모달: chart(AI)·fundamental(Rule)·valuation·macro (뉴스 제외 — 과거 재구성 불가)")
+    X, M, S, Y = build_samples(dates, horizon=args.horizon, ai_weight=args.ai_weight,
+                               market_cap_min=args.market_cap_min)
+    print(f"    샘플 {len(Y)}개")
+    if len(Y) < 8:
+        print("\n⚠ 샘플 부족 — 데이터가 더 필요합니다.")
+        print("  · 승인 전이면 `python main.py collect-us` 로 미국 데이터를 늘리거나,")
+        print("  · KRX 승인 후 `python main.py collect` 로 전종목 적재 후 재시도하세요.")
+        return
+
+    print(">>> [2/2] 게이트 신경망 학습")
+    lf = LearnedFusion()
+    metrics = lf.fit(X, M, S, Y, epochs=args.epochs)
+    path = lf.save()
+    print(f"    {metrics}")
+    print(f"\n완료 → {path}")
+    print("  이제 멀티모달 분석/대시보드에서 fusion_mode='learned'(또는 auto) 로 사용됩니다.")
+
+
 def cmd_dashboard(args: argparse.Namespace) -> None:
+    # `streamlit` 이 PATH 에 없을 수 있으므로 현재 파이썬의 -m 모듈 실행으로 호출.
     import subprocess
     subprocess.run(
-        ["streamlit", "run", str(ROOT / "src" / "ui" / "dashboard.py")],
+        [sys.executable, "-m", "streamlit", "run",
+         str(ROOT / "src" / "ui" / "dashboard.py")],
         check=False,
     )
 
@@ -454,13 +618,21 @@ def build_parser() -> argparse.ArgumentParser:
     sub = p.add_subparsers(dest="command", required=True)
 
     # collect
-    pc = sub.add_parser("collect", help="OHLCV + 시총 수집")
-    pc.add_argument("--start", default="2000-01-01",
-                    help="수집 시작일 (기본: 2000-01-01)")
+    pc = sub.add_parser("collect", help="OHLCV + 시총 + 유니버스 수집 (KRX OpenAPI)")
+    pc.add_argument("--start", default="2015-01-01",
+                    help="수집 시작일 (기본: 2015-01-01; KRX OpenAPI 는 ~2010년+ 제공)")
     pc.add_argument("--end-date", default=None,
-                    help="수집 종료일 + 종목 유니버스 기준일 (기본: 시스템 오늘). "
-                         "예: 2024-12-30. 시스템 시계가 잘못되어 있을 때 명시.")
+                    help="수집 종료일 (기본: 어제). 예: 2026-05-28")
+    pc.add_argument("--legacy-pykrx", action="store_true",
+                    help="옛 pykrx 종목별 수집 경로 사용 (KRX 사이트 로그인 필요, 느림)")
     pc.set_defaults(func=cmd_collect)
+
+    # seed (KRX OpenAPI 승인 전 임시 — 하드코딩 소수 우량주)
+    ps = sub.add_parser("seed",
+                        help="승인 전 임시: 하드코딩 우량주만 적재 (KRX 인증 불필요)")
+    ps.add_argument("--start", default="2015-01-01", help="수집 시작일 (기본: 2015-01-01)")
+    ps.add_argument("--end-date", default=None, help="수집 종료일 (기본: 어제)")
+    ps.set_defaults(func=cmd_seed)
 
     # update (증분 — 대시보드용 빠른 갱신)
     pu = sub.add_parser("update",
@@ -476,6 +648,18 @@ def build_parser() -> argparse.ArgumentParser:
                      help="대상 종목 시총 하한 (원). 기본=config.py 값 (5천억). "
                           "예: 3e11 (3천억), 1e12 (1조)")
     pcd.set_defaults(func=cmd_collect_dart)
+
+    # train-fusion (학습된 Late Fusion 게이트 — 옵션)
+    ptf = sub.add_parser("train-fusion",
+                         help="학습된 Late Fusion 게이트 학습 (옵션; 기본 가중평균은 유지)")
+    ptf.add_argument("--start", default="2015-01-01", help="학습 시작일")
+    ptf.add_argument("--end", default="2026-01-01", help="학습 종료일 (horizon 여유 두기)")
+    ptf.add_argument("--day", type=int, default=9, help="매월 샘플 시점 (기본: 9일)")
+    ptf.add_argument("--horizon", type=int, default=42, help="타깃 forward 거래일 (기본: 42)")
+    ptf.add_argument("--ai-weight", type=float, default=0.2)
+    ptf.add_argument("--market-cap-min", type=float, default=None)
+    ptf.add_argument("--epochs", type=int, default=400)
+    ptf.set_defaults(func=cmd_train_fusion)
 
     # collect-us (미국 주식 OHLCV)
     pcu = sub.add_parser("collect-us", help="미국 주식 OHLCV 수집 (S&P500 + Nasdaq100)")
@@ -524,8 +708,10 @@ def build_parser() -> argparse.ArgumentParser:
                     help="종료 연도 (기본: 2024)")
     pb.add_argument("--top-n", type=int, default=10,
                     help="매 리밸런싱 시점의 보유 종목 수 (기본: 10)")
-    pb.add_argument("--strategy", choices=["rule", "ai", "both", "ensemble"], default="rule",
-                    help="rule=규칙 / ai=LSTM / both=둘다 / ensemble=규칙+차트AI 앙상블")
+    pb.add_argument("--strategy", choices=["rule", "ai", "both", "ensemble", "chart-lstm"],
+                    default="rule",
+                    help="rule=규칙 / ensemble=규칙+LGBM Hybrid(v3+v4, 동봉) / "
+                         "chart-lstm=레거시 ChartLSTM(학습필요) / ai,both=멀티모달 .pth")
     pb.add_argument("--ai-weight", type=float, default=0.2,
                     help="앙상블에서 AI 비중 (0.0~1.0). 예: 0.2=80:20, 0.3=70:30")
     pb.add_argument("--model-path", default=None,
@@ -567,6 +753,15 @@ def build_parser() -> argparse.ArgumentParser:
                     help="기준 날짜 (예: 2020-01-02)")
     ps.add_argument("--top-n", type=int, default=10)
     ps.set_defaults(func=cmd_screen)
+
+    # analyze (단일 종목 멀티모달 분석)
+    pa = sub.add_parser("analyze", help="단일 종목 멀티모달 분석 (차트·펀더·밸류·뉴스·매크로 융합)")
+    pa.add_argument("ticker", help="종목 코드 (예: 005930)")
+    pa.add_argument("--name", default=None, help="종목명 (미지정 시 DB 에서 조회)")
+    pa.add_argument("--date", default=None, help="기준일 YYYY-MM-DD (기본: 오늘)")
+    pa.add_argument("--ai-weight", type=float, default=0.2,
+                    help="차트 AI 점수 산출 시 앙상블 AI 비중 (기본 0.2)")
+    pa.set_defaults(func=cmd_analyze)
 
     # dashboard
     pd_ = sub.add_parser("dashboard", help="Streamlit 대시보드")

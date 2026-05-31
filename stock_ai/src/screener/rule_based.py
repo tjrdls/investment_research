@@ -36,11 +36,12 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class ScreenerWeights:
-    """각 지표의 점수 가중치. PER 비활성화 시 자동 재정규화됨."""
+    """각 지표의 점수 가중치. PER/모멘텀 비활성 시 자동 재정규화됨."""
     per: float = 0.30          # PER 매력도 (낮을수록 ↑) - 선택적
     roe: float = 0.30          # ROE (높을수록 ↑)
     revenue_growth: float = 0.20   # 매출 성장률 (YoY)
     profit_growth: float = 0.20    # 순이익 성장률 (YoY)
+    price_momentum: float = 0.20   # 12-1개월 가격 모멘텀 (횡단면 평균수익 개선; 0이면 비활성)
 
 
 class RuleBasedScreener:
@@ -541,24 +542,30 @@ class RuleBasedScreener:
         # 순이익 성장률
         scores["profit_score"] = df["profit_growth_yoy"].rank(pct=True, na_option="bottom")
 
-        # 가중 합산 (PER 활성/비활성에 따라 자동 정규화)
+        # 가격 모멘텀 (12-1개월; 높을수록 ↑) — price_momentum 컬럼이 있을 때만
+        mom_active = (
+            getattr(w, "price_momentum", 0.0) > 0
+            and "price_momentum" in df.columns
+            and df["price_momentum"].notna().any()
+        )
+        if mom_active:
+            scores["momentum_score"] = df["price_momentum"].rank(pct=True, na_option="bottom")
+
+        # 가중 합산 — 활성 팩터만 모아 자동 정규화 (PER/모멘텀 결측 시 자동 제외)
+        terms = []
         if per_active:
-            total_w = w.per + w.roe + w.revenue_growth + w.profit_growth
-            weighted = (
-                w.per * scores["per_score"]
-                + w.roe * scores["roe_score"]
-                + w.revenue_growth * scores["revenue_score"]
-                + w.profit_growth * scores["profit_score"]
-            ) / total_w
-        else:
-            total_w = w.roe + w.revenue_growth + w.profit_growth
-            weighted = (
-                w.roe * scores["roe_score"]
-                + w.revenue_growth * scores["revenue_score"]
-                + w.profit_growth * scores["profit_score"]
-            ) / total_w
+            terms.append((w.per, scores["per_score"]))
+        terms.append((w.roe, scores["roe_score"]))
+        terms.append((w.revenue_growth, scores["revenue_score"]))
+        terms.append((w.profit_growth, scores["profit_score"]))
+        if mom_active:
+            terms.append((w.price_momentum, scores["momentum_score"]))
+        total_w = sum(wt for wt, _ in terms)
+        weighted = sum(wt * sc for wt, sc in terms) / total_w
 
         df["rule_score"] = (weighted * 100).round(2)
+        if mom_active:
+            logger.info("가격 모멘텀 팩터 적용 (가중 %.2f / 합 %.2f)", w.price_momentum, total_w)
 
         # ★ 시총 가산점 (대형주 우선)
         if cap_bonus and "market_cap" in df.columns:
@@ -621,8 +628,38 @@ class RuleBasedScreener:
             df["per_score"] = (scores["per_score"] * 100).round(1)
         else:
             df["per_score"] = None
+        if mom_active:
+            df["momentum_score"] = (scores["momentum_score"] * 100).round(1)
 
         return df
+
+    def _compute_price_momentum(self, tickers: list[str], as_of: str,
+                                lookback: int = 252, skip: int = 21) -> dict:
+        """12-1개월 가격 모멘텀: t-lookback ~ t-skip 누적수익률 (최근 1개월 제외).
+
+        최근 1개월(skip)을 빼는 이유 = 단기 반전(reversal) 효과 제거(고전 12-1 모멘텀).
+        반환: {ticker: momentum(float)}. 데이터 부족 종목은 제외.
+        """
+        if not tickers:
+            return {}
+        ph = ",".join("?" * len(tickers))
+        start = (pd.Timestamp(as_of) - pd.Timedelta(days=int((lookback + skip) * 1.7))
+                 ).strftime("%Y-%m-%d")
+        with sqlite3.connect(self.db_path) as conn:
+            px = pd.read_sql_query(
+                f"SELECT ticker, date, close FROM ohlcv "
+                f"WHERE ticker IN ({ph}) AND date BETWEEN ? AND ? ORDER BY ticker, date",
+                conn, params=[*tickers, start, as_of])
+        out: dict = {}
+        for tk, g in px.groupby("ticker"):
+            c = g["close"].reset_index(drop=True)
+            if len(c) < skip + 40:           # 최소 ~3개월 데이터 필요
+                continue
+            recent = c.iloc[-1 - skip]        # 최근 1개월 제외 시점
+            base = c.iloc[max(0, len(c) - 1 - lookback)]   # ~12개월 전 (짧으면 가장 과거)
+            if base and base > 0:
+                out[str(tk)] = float(recent / base - 1.0)
+        return out
 
     # ------------------------------------------------------------------
     # 메인 API
@@ -640,6 +677,7 @@ class RuleBasedScreener:
         market_ratio: Optional[str] = None,
         use_ttm_per: bool = False,
         use_ttm_fundamentals: bool = False,
+        use_momentum: bool = True,   # 12-1개월 가격 모멘텀 팩터 (default 스코어링에만 적용)
         # ---- 실험: 1단계 매출성장 상위 필터 ----
         revenue_growth_top_pct: Optional[float] = None,    # 0.10 = 상위 10%
         revenue_growth_hard_cutoff: Optional[float] = None,  # 0.15 = +15% 이상
@@ -871,6 +909,9 @@ class RuleBasedScreener:
             logger.info("[%s] 3단계 멀티팩터 (w_rev=%.2f, w_op=%.2f, w_per=%.2f, op=%s)",
                         as_of, w_rev, w_op, w_per, multifactor_op_metric)
         else:
+            if use_momentum and not df.empty:
+                mom = self._compute_price_momentum(df["ticker"].tolist(), as_of)
+                df["price_momentum"] = df["ticker"].map(mom)
             df = self._compute_scores(df)
 
         # ★ 추세 강도 가산점 (사용자 새 아이디어: 5/20/60 정배열 가산)

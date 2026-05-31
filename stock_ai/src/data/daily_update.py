@@ -1,11 +1,13 @@
-"""
-일별 증분 데이터 업데이트 (대시보드용)
+"""일별 증분 데이터 업데이트 (대시보드용)
 ====================================
-DB 의 마지막 날짜부터 어제(또는 지정일)까지 OHLCV + 시가총액을
-일별 일괄 조회 API 로 빠르게 채워넣는다.
+DB 의 마지막 날짜부터 어제(또는 지정일)까지 OHLCV + 시가총액을 빠르게 채워넣는다.
 
-종목별 수집 (`PyKrxLoader.collect_all`) 은 종목당 한 번씩 API 호출하므로 수 시간이 걸리지만,
-이 모듈은 일자별 bulk API 한 번에 모든 종목을 가져오므로 며칠 분량을 분 단위에 마무리한다.
+데이터 소스 (2026 KRX 로그인 게이트 대응):
+  - 주식(KOSPI/KOSDAQ): **KRX OpenAPI** (`KRX_AUTH_KEY`) — 날짜-bulk, 시총·상장주식수 포함
+  - ETF/지수(069500 벤치마크 · 132030 금헤지): **pykrx 종목별 조회** (로그인 없이 동작)
+
+종목별 수집(`PyKrxLoader.collect_all`)보다 빠르고, 대시보드 "데이터 업데이트" 버튼이
+호출하는 `update_to` / `status_summary` 의 시그니처·반환 계약은 그대로 유지한다.
 """
 from __future__ import annotations
 
@@ -26,8 +28,12 @@ except ImportError:
     raise ImportError("pykrx 미설치. `pip install pykrx`")
 
 from src.config import DB_PATH
+from src.data.krx_openapi_loader import KrxApiError, KrxOpenApiLoader
 
 logger = logging.getLogger(__name__)
+
+# 백테스트 정합성에 필수인 ETF/지수 (벤치마크·금헤지). pykrx 종목별 조회로 받는다.
+ESSENTIAL_ETFS = ["069500", "132030"]
 
 
 @contextmanager
@@ -77,18 +83,10 @@ def yesterday(today: Optional[date] = None) -> date:
 
 
 def _has_credentials() -> bool:
+    """KRX OpenAPI 인증키 우선, 레거시 KRX_ID/PW 도 허용."""
+    if os.environ.get("KRX_AUTH_KEY"):
+        return True
     return bool(os.environ.get("KRX_ID")) and bool(os.environ.get("KRX_PW"))
-
-
-def _trading_days_between(start: date, end: date) -> list[date]:
-    """start(불포함) ~ end(포함) 사이의 평일 리스트."""
-    out = []
-    d = start + timedelta(days=1)
-    while d <= end:
-        if d.weekday() < 5:
-            out.append(d)
-        d += timedelta(days=1)
-    return out
 
 
 def _fetch_with_retry(fn, *args, retries: int = 3, sleep: float = 0.5, **kwargs):
@@ -101,156 +99,117 @@ def _fetch_with_retry(fn, *args, retries: int = 3, sleep: float = 0.5, **kwargs)
     return None
 
 
-def _ingest_day(target: date, db_path: Path = DB_PATH) -> dict:
-    """단일 거래일의 KOSPI+KOSDAQ 전종목 OHLCV+시총 + ETF OHLCV 를 일괄 조회 후 적재.
+def _f(v):
+    try:
+        if v is None or pd.isna(v):
+            return None
+        return float(v)
+    except (TypeError, ValueError):
+        return None
 
-    ETF 는 일반 주식 bulk API 에 안 잡혀 별도 호출 필요 (벤치마크 069500 KODEX 200,
-    금 헤지 132030 KODEX 골드선물 등이 ETF 라 백테스트 정합성에 필수).
 
-    Returns: {"date": ..., "ohlcv_rows": int, "cap_rows": int,
-              "etf_rows": int, "trading": bool}
+def _i(v):
+    try:
+        if v is None or pd.isna(v):
+            return None
+        return int(v)
+    except (TypeError, ValueError):
+        return None
+
+
+def _backfill_etfs(start_iso: str, end_iso: str, db_path: Path = DB_PATH) -> int:
+    """ESSENTIAL_ETFS 의 OHLCV 를 pykrx 종목별(기간) 조회로 적재. 적재 행수 반환.
+
+    pykrx `get_market_ohlcv(start, end, ticker)` 는 로그인 없이도 동작하므로
+    벤치마크·금헤지 ETF 는 이 경로로 받는다 (KRX OpenAPI ETF 엔드포인트 의존 회피).
     """
-    ymd = target.strftime("%Y%m%d")
-    iso = target.strftime("%Y-%m-%d")
-
-    ohlcv_rows: list[tuple] = []
-    cap_rows: list[tuple] = []
-
-    for market in ("KOSPI", "KOSDAQ"):
-        df_o = _fetch_with_retry(stock.get_market_ohlcv_by_ticker, ymd, market=market)
-        if df_o is None or df_o.empty:
+    if not start_iso or not end_iso:
+        return 0
+    ymd_s, ymd_e = start_iso.replace("-", ""), end_iso.replace("-", "")
+    rows: list[tuple] = []
+    for tk in ESSENTIAL_ETFS:
+        df = _fetch_with_retry(stock.get_market_ohlcv, ymd_s, ymd_e, tk)
+        if df is None or df.empty:
             continue
-        for tk, row in df_o.iterrows():
-            ohlcv_rows.append((
-                str(tk), iso,
-                _f(row.get("시가")), _f(row.get("고가")), _f(row.get("저가")),
-                _f(row.get("종가")), _i(row.get("거래량")),
+        for idx, r in df.iterrows():
+            rows.append((
+                tk, idx.strftime("%Y-%m-%d"),
+                _f(r.get("시가")), _f(r.get("고가")), _f(r.get("저가")),
+                _f(r.get("종가")), _i(r.get("거래량")),
             ))
-
-        df_c = _fetch_with_retry(stock.get_market_cap_by_ticker, ymd, market=market)
-        if df_c is not None and not df_c.empty:
-            for tk, row in df_c.iterrows():
-                cap_rows.append((
-                    str(tk), iso,
-                    _f(row.get("시가총액")), _i(row.get("상장주식수")),
-                ))
-
-    # ETF — 별도 bulk API. (벤치마크/금헤지 ETF 가 여기 들어있음)
-    etf_rows: list[tuple] = []
-    df_e = _fetch_with_retry(stock.get_etf_ohlcv_by_ticker, ymd)
-    if df_e is not None and not df_e.empty:
-        for tk, row in df_e.iterrows():
-            etf_rows.append((
-                str(tk), iso,
-                _f(row.get("시가")), _f(row.get("고가")), _f(row.get("저가")),
-                _f(row.get("종가")), _i(row.get("거래량")),
-            ))
-
-    trading = bool(ohlcv_rows) or bool(etf_rows)
-    if not trading:
-        return {"date": iso, "ohlcv_rows": 0, "cap_rows": 0,
-                "etf_rows": 0, "trading": False}
-
-    with _conn(db_path) as c:
-        if ohlcv_rows:
+    if rows:
+        with _conn(db_path) as c:
             c.executemany(
                 "INSERT INTO ohlcv (ticker, date, open, high, low, close, volume) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?) "
-                "ON CONFLICT(ticker, date) DO NOTHING",
-                ohlcv_rows,
+                "VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(ticker, date) DO NOTHING",
+                rows,
             )
-        if etf_rows:
-            c.executemany(
-                "INSERT INTO ohlcv (ticker, date, open, high, low, close, volume) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?) "
-                "ON CONFLICT(ticker, date) DO NOTHING",
-                etf_rows,
-            )
-        if cap_rows:
-            c.executemany(
-                "INSERT INTO market_cap (ticker, date, market_cap, shares) "
-                "VALUES (?, ?, ?, ?) "
-                "ON CONFLICT(ticker, date) DO NOTHING",
-                cap_rows,
-            )
-
-    return {"date": iso, "ohlcv_rows": len(ohlcv_rows), "cap_rows": len(cap_rows),
-            "etf_rows": len(etf_rows), "trading": True}
+    return len(rows)
 
 
 def update_to(target_date: Optional[date] = None,
               db_path: Path = DB_PATH,
               progress_cb=None) -> dict:
-    """DB 의 마지막 OHLCV 날짜 다음 날부터 target_date(기본=어제)까지 일별 적재.
-    progress_cb(current_idx, total, label) — 선택, Streamlit 진행률 표시용.
+    """DB 의 마지막 OHLCV 날짜 다음 날부터 target_date(기본=어제)까지 증분 적재.
 
-    Returns: {
-        "from": "YYYY-MM-DD" | None,        # 시작 시 DB 최대일
-        "to":   "YYYY-MM-DD",               # 목표일
-        "days_processed": int,              # 시도한 거래일 수
-        "days_added": int,                  # 데이터 적재된 거래일 수
-        "ohlcv_rows": int, "cap_rows": int,
-        "skipped": ["YYYY-MM-DD", ...],     # 비거래일/휴장일
-        "elapsed_sec": float,
-        "ok": bool, "error": str|None,
-    }
+    주식은 KRX OpenAPI, ETF/지수는 pykrx 종목별 조회. 반환 dict 는 기존 계약 유지:
+        {from, to, days_processed, days_added, ohlcv_rows, cap_rows, etf_rows,
+         skipped, elapsed_sec, ok, error}
     """
     target = target_date or yesterday()
     last = get_db_max_date(db_path)
     if last is None:
-        return {"from": None, "to": target.strftime("%Y-%m-%d"),
-                "days_processed": 0, "days_added": 0,
-                "ohlcv_rows": 0, "cap_rows": 0, "skipped": [],
-                "elapsed_sec": 0.0, "ok": False,
-                "error": "OHLCV 테이블 비어있음 — 먼저 `python main.py collect` 로 초기 적재 필요"}
+        return _err(None, target, "OHLCV 테이블 비어있음 — 먼저 `python main.py collect` 로 초기 적재 필요")
 
     if not _has_credentials():
-        return {"from": last, "to": target.strftime("%Y-%m-%d"),
-                "days_processed": 0, "days_added": 0,
-                "ohlcv_rows": 0, "cap_rows": 0, "skipped": [],
-                "elapsed_sec": 0.0, "ok": False,
-                "error": "KRX_ID / KRX_PW 미설정 (.env 파일 확인)"}
+        return _err(last, target, "KRX_AUTH_KEY 미설정 (.env 파일 확인)")
 
     last_dt = datetime.strptime(last, "%Y-%m-%d").date()
     if last_dt >= target:
         return {"from": last, "to": target.strftime("%Y-%m-%d"),
                 "days_processed": 0, "days_added": 0,
-                "ohlcv_rows": 0, "cap_rows": 0, "skipped": [],
+                "ohlcv_rows": 0, "cap_rows": 0, "etf_rows": 0, "skipped": [],
                 "elapsed_sec": 0.0, "ok": True, "error": None}
 
-    days = _trading_days_between(last_dt, target)
-    total = len(days)
-    added, ohlcv_rows, cap_rows, etf_rows, skipped = 0, 0, 0, 0, []
     t0 = time.time()
+    start_iso = (last_dt + timedelta(days=1)).strftime("%Y-%m-%d")
+    target_iso = target.strftime("%Y-%m-%d")
 
-    for i, d in enumerate(days, 1):
-        if progress_cb:
-            progress_cb(i - 1, total, d.strftime("%Y-%m-%d"))
-        try:
-            res = _ingest_day(d, db_path=db_path)
-        except Exception as e:
-            logger.warning("%s 적재 실패: %s", d, e)
-            continue
-        if res["trading"]:
-            added += 1
-            ohlcv_rows += res["ohlcv_rows"]
-            cap_rows += res["cap_rows"]
-            etf_rows += res.get("etf_rows", 0)
-            logger.info("✓ %s: OHLCV %d행, ETF %d행, 시총 %d행",
-                        res["date"], res["ohlcv_rows"], res.get("etf_rows", 0),
-                        res["cap_rows"])
-        else:
-            skipped.append(res["date"])
-            logger.info("∙ %s: 휴장", res["date"])
+    # 1) 주식 — KRX OpenAPI
+    loader = KrxOpenApiLoader(db_path=db_path)
+    try:
+        res = loader.collect_range(start_iso, target_iso, progress_cb=progress_cb)
+    except KrxApiError as e:
+        return _err(last, target, str(e))
+    if not res.get("ok"):
+        # 호출제한/인증 등 → 부분 결과라도 ETF 백필 시도 후 반환
+        res.setdefault("from", start_iso)
+        res.setdefault("to", target_iso)
 
-    if progress_cb:
-        progress_cb(total, total, "완료")
+    # 2) ETF/지수 — pykrx 종목별
+    etf_rows = _backfill_etfs(res.get("from", start_iso), res.get("to", target_iso), db_path)
 
+    return {
+        "from": last,
+        "to": target_iso,
+        "days_processed": res.get("days_processed", 0),
+        "days_added": res.get("days_added", 0),
+        "ohlcv_rows": res.get("ohlcv_rows", 0),
+        "cap_rows": res.get("cap_rows", 0),
+        "etf_rows": etf_rows,
+        "skipped": res.get("skipped", []),
+        "api_calls": res.get("api_calls"),
+        "elapsed_sec": time.time() - t0,
+        "ok": bool(res.get("ok")),
+        "error": res.get("error"),
+    }
+
+
+def _err(last, target, msg: str) -> dict:
     return {"from": last, "to": target.strftime("%Y-%m-%d"),
-            "days_processed": total, "days_added": added,
-            "ohlcv_rows": ohlcv_rows, "cap_rows": cap_rows, "etf_rows": etf_rows,
-            "skipped": skipped,
-            "elapsed_sec": time.time() - t0, "ok": True, "error": None}
+            "days_processed": 0, "days_added": 0,
+            "ohlcv_rows": 0, "cap_rows": 0, "etf_rows": 0, "skipped": [],
+            "elapsed_sec": 0.0, "ok": False, "error": msg}
 
 
 def status_summary(db_path: Path = DB_PATH, today: Optional[date] = None) -> dict:
@@ -274,24 +233,6 @@ def status_summary(db_path: Path = DB_PATH, today: Optional[date] = None) -> dic
         "days_behind": days_behind,
         "has_credentials": _has_credentials(),
     }
-
-
-def _f(v):
-    try:
-        if v is None or pd.isna(v):
-            return None
-        return float(v)
-    except (TypeError, ValueError):
-        return None
-
-
-def _i(v):
-    try:
-        if v is None or pd.isna(v):
-            return None
-        return int(v)
-    except (TypeError, ValueError):
-        return None
 
 
 if __name__ == "__main__":

@@ -537,6 +537,49 @@ def tab_recommend(cfg: dict) -> None:
         rn = {c: l for c, l in full if c in display.columns}
         st.dataframe(display[cs].rename(columns=rn), use_container_width=True)
 
+    # ── GPT 종합: 이미 계산된 점수 + 뉴스 텍스트 → GPT (재평가 없음, 라이브 전용) ──
+    st.divider()
+    st.markdown("### 🧬 멀티모달 종합 (점수 + 뉴스 → GPT)")
+    st.caption("위 추천 종목의 **이미 계산된 점수**(앙상블/Rule/AI·ROE·PER)와 **최근 뉴스 텍스트**를 "
+               "GPT 에 그대로 전달해 포트폴리오 종합. **재평가 없음** · 백테스트엔 미적용(뉴스·GPT 과거 "
+               "재구성 불가) — *오늘의 추천* 전용.")
+    if st.button(f"🧬 GPT 종합 실행 ({n}종목)", key="mm_recommend"):
+        with st.spinner("종목별 뉴스 수집 + GPT 종합 중..."):
+            try:
+                from src.recommend.multimodal_recommend import recommend_with_gpt
+                res = recommend_with_gpt(picks, as_of)
+            except Exception as e:  # noqa: BLE001
+                st.error(f"GPT 종합 실패: {e}")
+                res = None
+        if res:
+            s = res["summary"]
+            if s.get("source") == "llm":
+                if s.get("overview"):
+                    st.write(s["overview"])
+                if s.get("top_picks"):
+                    st.markdown("**우선순위**")
+                    for t in s["top_picks"]:
+                        st.markdown(f"- {t}")
+                if s.get("cautions"):
+                    st.markdown("**주의**")
+                    for c in s["cautions"]:
+                        st.markdown(f"- {c}")
+                if s.get("theme"):
+                    st.caption(f"테마: {s['theme']}")
+            else:
+                st.write(s.get("overview", ""))
+                st.caption("※ OPENAI_API_KEY 미설정 — 규칙 요약. LLM 종합은 .env에 키 설정.")
+
+            with st.expander("GPT 에 전달된 뉴스 (종목별)"):
+                for item in res["stocks"]:
+                    st.markdown(f"**{item['name']}**")
+                    news = item.get("news") or []
+                    if news:
+                        for t in news:
+                            st.markdown(f"- {t}")
+                    else:
+                        st.caption("(뉴스 없음)")
+
 
 # ============================================================
 # 탭 2: 종목 검색
@@ -848,6 +891,20 @@ def _compute_validation(data_version: str = ""):
     return dict(blackswan=bs, mc=mc, verdict=v, realized=realized)
 
 
+def _lazy_gate(state_key: str, label: str, hint: str) -> bool:
+    """무거운 탭 지연 로딩. 버튼 클릭(또는 세션 내 이미 로드됨)이면 True.
+
+    st.tabs 는 매 실행마다 모든 탭 본문을 돌리므로, 무거운 계산을 버튼 뒤로 빼
+    콜드 스타트를 줄인다. 한 번 누르면 세션 동안 유지(캐시라 이후 즉시 표시)."""
+    if st.session_state.get(state_key):
+        return True
+    st.info(hint)
+    if st.button(label, key=f"{state_key}_btn", type="primary"):
+        st.session_state[state_key] = True
+        return True
+    return False
+
+
 def tab_validation() -> None:
     """블랙스완 + 몬테카를로 검증 결과."""
     st.markdown("## 시스템 검증 (블랙스완 + 몬테카를로)")
@@ -855,6 +912,10 @@ def tab_validation() -> None:
         "역사적 위기 3건의 방어 성적 + 일별 수익률 부트스트랩 10,000회. "
         "실측 라이브 결과 기준 — 시뮬레이션이 아닌 실제 측정값."
     )
+    if not _lazy_gate("val_loaded", "▶ 검증 계산 실행 (백테스트 + MC 10,000회)",
+                      "버튼을 누르면 블랙스완 분석 + 몬테카를로 10,000회를 계산합니다. "
+                      "콜드 캐시일 때만 시간이 걸리고, 이후엔 캐시되어 즉시 표시됩니다."):
+        return
     with st.spinner("검증 계산 중... (캐시 1일)"):
         try:
             data = _compute_validation(_data_version())
@@ -932,6 +993,10 @@ def tab_performance() -> None:
         "v3=차트 10피처 (IC 0.131), v4=차트+펀더멘털 13피처 (Spread +6.39%pt)."
     )
 
+    if not _lazy_gate("perf_loaded", "▶ 성과 계산 실행 (2015~현재 풀 백테스트)",
+                      "버튼을 누르면 2015~현재 풀 백테스트를 실행합니다. "
+                      "콜드 캐시일 때만 시간이 걸리고, 이후엔 캐시되어 즉시 표시됩니다."):
+        return
     with st.spinner("실시간 백테스트 로딩 중... (데이터 갱신 시 자동 재계산)"):
         try:
             r = get_live_backtest(_data_version())
@@ -1321,6 +1386,323 @@ def tab_status() -> None:
 # ============================================================
 # 메인
 # ============================================================
+MODAL_LABELS = {
+    "chart": "📈 차트 (AI 랭킹)",
+    "fundamental": "🏦 펀더멘털 (Rule)",
+    "valuation": "💰 밸류에이션",
+    "news": "📰 뉴스 감성",
+    "macro": "🌐 시장 매크로",
+}
+
+
+def tab_multimodal() -> None:
+    """멀티모달 종목 분석 — 5개 모달리티 → Late Fusion 종합 판정."""
+    import os
+
+    st.subheader("🧬 멀티모달 종목 분석")
+    st.caption("차트(AI 랭킹) · 펀더멘털(Rule) · 밸류에이션 · 뉴스 감성 · 시장 매크로 "
+               "5개 신호를 독립 산출 후 **Late Fusion**으로 종합 판정합니다.")
+
+    # ── 종목 선택 ──
+    q = st.text_input("종목", placeholder="종목코드 또는 이름 (예: 005930, 삼성전자)",
+                      key="mm_q", label_visibility="collapsed").strip()
+    if not q:
+        st.caption("종목 코드 또는 이름의 일부를 입력하세요.")
+        return
+    with sqlite3.connect(DB_PATH) as conn:
+        matches = pd.read_sql_query(
+            "SELECT ticker, name, market FROM tickers "
+            "WHERE ticker LIKE ? OR name LIKE ? ORDER BY name LIMIT 30",
+            conn, params=[f"%{q}%", f"%{q}%"])
+    if matches.empty:
+        st.caption(f"'{q}'와 일치하는 종목이 없습니다.")
+        return
+    if len(matches) > 1:
+        idx = st.selectbox(
+            f"매칭 {len(matches)}개", range(len(matches)),
+            format_func=lambda i: f"{matches.iloc[i]['ticker']} · "
+                                  f"{matches.iloc[i]['name']} ({matches.iloc[i]['market']})",
+            key="mm_sel", label_visibility="collapsed")
+        sel = matches.iloc[idx]
+    else:
+        sel = matches.iloc[0]
+        st.caption(f"{sel['ticker']} · {sel['name']} · {sel['market']}")
+    tk, name = sel["ticker"], sel["name"]
+
+    default_as_of = status_summary().get("ohlcv_max") or date.today().isoformat()
+    cda, cdb = st.columns([2, 2])
+    as_of = (cda.text_input("기준일 (YYYY-MM-DD)", value=default_as_of,
+                            key="mm_asof").strip() or default_as_of)
+    fusion_mode = cdb.radio(
+        "융합 방식",
+        options=["weighted", "learned"],
+        format_func=lambda m: "가중 평균 (기본·해석 가능)" if m == "weighted"
+        else "학습 게이팅 (train-fusion 필요)",
+        horizontal=True, key="mm_fmode")
+
+    if not st.button("멀티모달 분석 실행", type="primary", key="mm_run"):
+        return
+
+    with st.spinner("5개 모달리티 분석 + Late Fusion 중..."):
+        try:
+            from src.modality.analyzer import MultimodalAnalyzer
+            res = MultimodalAnalyzer().analyze(tk, name, as_of, fusion_mode=fusion_mode)
+        except Exception as e:  # noqa: BLE001
+            st.error(f"분석 실패: {e}")
+            return
+
+    fusion = res["fusion"]
+    used_mode = res.get("fusion_mode", "weighted")
+    if fusion_mode == "learned" and used_mode == "weighted":
+        st.info("학습된 게이트 모델이 없어 가중 평균으로 분석했습니다. "
+                "`python main.py train-fusion` 으로 게이트를 학습하세요.")
+    st.caption(f"융합 방식: **{'학습 게이팅' if used_mode == 'learned' else '가중 평균'}**")
+
+    # ── 종합 판정 ──
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("융합 점수", f"{fusion.score:.1f} / 100")
+    c2.metric("방향", fusion.direction)
+    c3.metric("판정", fusion.verdict)
+    c4.metric("신뢰도", f"{fusion.confidence * 100:.0f}%")
+    if fusion.conflict:
+        st.warning(f"⚠️ 신호 충돌: {fusion.conflict_note}")
+
+    # ── 모달리티별 분해 ──
+    st.markdown("#### 모달리티별 신호")
+    rows = []
+    for nm, sig in fusion.signals.items():
+        avail = sig.available
+        rows.append({
+            "모달리티": MODAL_LABELS.get(nm, nm),
+            "점수(0~100)": round(sig.score, 1) if avail else None,
+            "신뢰도": f"{sig.confidence * 100:.0f}%" if avail else "–",
+            "융합 기여도": f"{fusion.contributions.get(nm, 0) * 100:.0f}%"
+                            if nm in fusion.contributions else "–",
+            "설명": sig.label if avail else f"제외 · {sig.detail.get('reason', '데이터 없음')}",
+        })
+    st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
+
+    bars = {MODAL_LABELS.get(nm, nm): sig.score
+            for nm, sig in fusion.signals.items() if sig.available}
+    if bars:
+        st.bar_chart(pd.Series(bars, name="점수"))
+        st.caption("50 = 중립. 위로 갈수록 강세 신호.")
+
+    # ── 종합 코멘트 (LLM 내러티브 또는 규칙 요약) ──
+    st.markdown("#### 종합 코멘트")
+    report = res.get("report") or ""
+    if report:
+        st.markdown(report)
+    else:
+        st.write(fusion.summary() if hasattr(fusion, "summary") else str(fusion))
+    if not os.getenv("OPENAI_API_KEY"):
+        st.caption("※ OPENAI_API_KEY 미설정 — 규칙 기반 요약입니다. "
+                   "LLM 내러티브를 보려면 .env에 OPENAI_API_KEY를 설정하세요.")
+
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def _reproduce_ai_weight_grid(start_year: int, end_year: int, data_version: str = ""):
+    """ai_weight ∈ {0,0.2,...,1.0} 각각 백테스트 → TR/Sharpe/MDD 비교 (README §7 재현)."""
+    from src.backtest.rebalance import run_rule_based_backtest
+    base = dict(start_year=start_year, end_year=end_year, top_n=10,
+                period_months=2, rebalance_day=9, replacement_rule="keep_simple",
+                market_split=True, trend_filter=True, market_cap_min=1e12,
+                ichimoku_adx=True, ia_scaling=True, use_ttm_per=True,
+                defensive_ticker="132030")
+    rows = []
+    for w in [0.0, 0.2, 0.4, 0.6, 0.8, 1.0]:
+        kw = dict(base)
+        if w > 0:
+            kw["ai_weight"] = w           # None=순수 Rule, >0=LGBM 앙상블
+        try:
+            m = run_rule_based_backtest(**kw).metrics
+            rows.append({
+                "ai_weight": f"{w:.1f}" + (" (Rule)" if w == 0 else (" (AI만)" if w == 1 else "")),
+                "총수익": f"{m.get('total_return', 0)*100:.1f}%",
+                "Sharpe": f"{m.get('sharpe', 0):.2f}",
+                "MDD(일별)": f"{m.get('mdd_daily', m.get('mdd', 0))*100:.1f}%",
+            })
+        except Exception as e:  # noqa: BLE001
+            rows.append({"ai_weight": f"{w:.1f}", "총수익": "실패",
+                         "Sharpe": str(e)[:24], "MDD(일별)": "-"})
+    return pd.DataFrame(rows)
+
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def _run_bt_metrics(overrides_items: tuple, start_year: int, end_year: int,
+                    data_version: str = "") -> dict:
+    """production 기본 설정에 overrides 적용 후 백테스트 → TR/Sharpe/MDD dict.
+    overrides_items: 해시 가능하도록 (key, value) 튜플의 튜플."""
+    from src.backtest.rebalance import run_rule_based_backtest
+    base = dict(start_year=start_year, end_year=end_year, top_n=10, period_months=2,
+                rebalance_day=9, replacement_rule="keep_simple", market_split=True,
+                trend_filter=True, market_cap_min=1e12, ichimoku_adx=True, ia_scaling=True,
+                use_ttm_per=True, defensive_ticker="132030")
+    base.update(dict(overrides_items))
+    try:
+        m = run_rule_based_backtest(**base).metrics
+        return {"총수익": f"{m.get('total_return', 0)*100:.1f}%",
+                "Sharpe": f"{m.get('sharpe', 0):.2f}",
+                "MDD(일별)": f"{m.get('mdd_daily', m.get('mdd', 0))*100:.1f}%"}
+    except Exception as e:  # noqa: BLE001
+        return {"총수익": "실패", "Sharpe": str(e)[:18], "MDD(일별)": "-"}
+
+
+def tab_reproduce() -> None:
+    """재현 탭 — '무엇에서 무엇으로 바꿨는지'(중간발표 → 현재)를 항목 제목으로,
+    각 변경의 기술 설명 + 재현(before/after)을 본문에 담는다."""
+    st.markdown("## 🔁 재현 (중간발표 → 현재, 변경별 재현)")
+    st.caption("각 항목 = **무엇에서 무엇으로 바꿨는가**. 펼치면 기술 설명 + 그 변경을 "
+               "현재 코드로 직접 재현(before/after)합니다. '정직한 검증'을 GUI로 증명.")
+
+    s = status_summary()
+    try:
+        with sqlite3.connect(DB_PATH) as c:
+            n_tk = c.execute("SELECT COUNT(*) FROM tickers").fetchone()[0]
+    except Exception:
+        n_tk = 0
+    is_seed = n_tk < 100
+    if is_seed:
+        st.warning(
+            f"⚠️ 현재 DB = **시드 모드** ({n_tk}종목). 재현값은 헤드라인(전체 데이터) 수치와 "
+            "다릅니다 — 지금은 **메커니즘 재현**이고, KRX 승인 후 `python main.py collect` 하면 "
+            "**같은 버튼이 진짜 수치를 재현**합니다.")
+    else:
+        st.success(f"현재 DB = 전체 모드 ({n_tk:,}종목). 헤드라인 수치 재현 가능.")
+
+    # 백테스트형 재현이 공유하는 기간
+    c1, c2 = st.columns(2)
+    sy = int(c1.number_input("백테스트 시작연도", 2015, 2026, 2023, key="rep_sy"))
+    ey = int(c2.number_input("백테스트 종료연도", 2015, 2026, 2026, key="rep_ey"))
+    ver = _data_version()
+    st.caption(f"데이터 기준일: {s.get('ohlcv_max')} · 백테스트형 항목은 위 기간으로 실행 "
+               "(범위 넓으면 느림)")
+    st.divider()
+
+    # ① 메인 모델 -----------------------------------------------------------
+    with st.expander("① 메인 모델:  멀티모달 LSTM(원본)  →  lateLSTM(개선)  →  LGBM Hybrid"):
+        st.caption("〔여기에 기술 설명〕 ① LSTM 개선: 원본 멀티모달 LSTM(LSTM+텍스트 concat, early "
+                   "fusion, 3분류) → lateLSTM(차트 전용, 양방향+Attention+회귀헤드; val IC 0.227). "
+                   "② LGBM 변경: walk-forward OOS 0.04 누수 → LGBM(v3 IC 0.131) 채택. "
+                   "LSTM 계열 병행 유지. (코드 클래스명: ChartLSTM)")
+        st.info("🔬 재현(같은 walk-forward 의 Rule/LGBM/ChartLSTM Rank IC·spread)은 "
+                "① 통합 비교 하네스 완성 후 여기에 표시됩니다.")
+
+    # ② 예측 타깃 -----------------------------------------------------------
+    with st.expander("② 예측 타깃:  5일·상승/하락 3분류  →  42일·횡단면 백분위 랭킹"):
+        st.caption("〔여기에 기술 설명〕 단일 종목 단기 방향 → 포트폴리오 보유기간(2개월) 정합 + "
+                   "Top-N 상대 선별(횡단면 랭킹). 평가지표 = Rank IC.")
+        st.info("🔬 재현(ChartLSTM @42 vs @126, 분류 vs 랭킹)은 비교 하네스 완성 후 표시됩니다.")
+
+    # ③ 융합 방식 -----------------------------------------------------------
+    with st.expander("③ 융합:  Early(Intermediate) Fusion  →  Late Fusion (+ 학습 게이팅 옵션)"):
+        st.caption("〔여기에 기술 설명〕 원본 MultimodalStockPredictor 가 LSTM+텍스트를 모델 내부 "
+                   "concat(early) → 모달별 독립 신호를 밖에서 결합(late). 현재 가중평균 + 학습 게이팅.")
+        tk = st.text_input("종목코드", "005930", key="rep_fus_tk").strip()
+        if st.button("▶ 재현: 가중평균 vs 학습게이팅", key="rep_fus"):
+            with st.spinner("멀티모달 분석 중..."):
+                try:
+                    from src.modality.analyzer import MultimodalAnalyzer
+                    a = MultimodalAnalyzer()
+                    rows = []
+                    for mode in ("weighted", "learned"):
+                        r = a.analyze(tk, tk, s.get("ohlcv_max"), fusion_mode=mode)
+                        f = r["fusion"]
+                        top = sorted(f.contributions.items(), key=lambda x: -x[1])[:3]
+                        rows.append({
+                            "방식": "가중평균(기본)" if r["fusion_mode"] == "weighted" else "학습 게이팅",
+                            "융합점수": f"{f.score:.1f}", "방향": f.direction, "판정": f.verdict,
+                            "주요 기여": ", ".join(f"{k} {v:.0%}" for k, v in top)})
+                    st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
+                    st.caption("🔬 early-fusion(학습된 intermediate net) 직접 비교는 비교 하네스에서 추가.")
+                except Exception as e:  # noqa: BLE001
+                    st.error(f"재현 실패: {e}")
+
+    # ④ 밸류에이션 ----------------------------------------------------------
+    with st.expander("④ 밸류에이션:  KRX 공식 PER  →  자체 DART TTM PER"):
+        st.caption("〔여기에 기술 설명〕 KRX 공식 PER 은 EPS 연 1회 갱신 → 이익급증주 과대평가. "
+                   "DART 분기 순이익 4개 합산 TTM PER 로 직접 계산(공시일+45/90일 룩어헤드 차단). "
+                   "주장: 408.6% → 466.0%, 샤프 0.86 → 0.90.")
+        if st.button("▶ 재현: TTM PER OFF vs ON", key="rep_per"):
+            with st.spinner("백테스트 2회..."):
+                before = _run_bt_metrics((("use_ttm_per", False),), sy, ey, ver)
+                after = _run_bt_metrics((("use_ttm_per", True),), sy, ey, ver)
+            st.dataframe(pd.DataFrame([
+                {"구분": "전: TTM PER OFF (PER 점수 비활성/KRX식)", **before},
+                {"구분": "후: 자체 TTM PER ON", **after},
+            ]), hide_index=True, use_container_width=True)
+
+    # ⑤ 리밸런싱 ------------------------------------------------------------
+    with st.expander("⑤ 리밸런싱 주기:  6개월  →  2개월 · 매월 9일"):
+        st.caption("〔여기에 기술 설명〕 그리드 검증 결과 2개월이 TR·샤프 최적. 9일 = DART 분기보고 "
+                   "공시 시즌(분기말+45일) 직전이라 신선한 실적 반영.")
+        if st.button("▶ 재현: 리밸 주기 그리드", key="rep_period"):
+            with st.spinner("주기별 백테스트..."):
+                rows = []
+                for pm in (1, 2, 3, 6):
+                    m = _run_bt_metrics((("period_months", pm),), sy, ey, ver)
+                    rows.append({"리밸 주기": f"{pm}개월" + (" ★(채택)" if pm == 2 else ""), **m})
+            st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
+
+    # ⑥ AI 비중 ------------------------------------------------------------
+    with st.expander("⑥ AI 비중:  Rule 50%/AI 50%·30%  →  AI 20% (sweet spot)"):
+        st.caption("〔여기에 기술 설명〕 검증된 Rule 4팩터가 이미 강한 알파 → AI 는 미세 변별만. "
+                   "0.6↑ 면 Rule 신호 희석 → 알파 하락. 0.2 가 sweet spot.")
+        if st.button("▶ 재현: ai_weight 그리드 (0~1.0)", key="rep_aiw"):
+            with st.spinner("ai_weight 6개 백테스트..."):
+                st.dataframe(_reproduce_ai_weight_grid(sy, ey, ver),
+                             hide_index=True, use_container_width=True)
+
+    # ⑥-B 가격 모멘텀 팩터 (수익성 개선 — 신규 추가) ------------------------
+    with st.expander("⑥-B 팩터 추가:  4팩터(가치·품질)  →  + 12-1개월 가격 모멘텀 (멀티팩터)"):
+        st.caption("〔여기에 기술 설명〕 횡단면 모멘텀은 여러 레짐에서 작동하는 지속적 알파 → "
+                   "평균 수익을 높이는 멀티팩터 블렌딩(고점 베팅 아님). 최근 1개월 제외(반전 회피).")
+        if st.button("▶ 재현: 모멘텀 OFF vs ON", key="rep_mom"):
+            with st.spinner("백테스트 2회..."):
+                before = _run_bt_metrics((("use_momentum", False),), sy, ey, ver)
+                after = _run_bt_metrics((("use_momentum", True),), sy, ey, ver)
+            st.dataframe(pd.DataFrame([
+                {"구분": "전: 4팩터만 (모멘텀 OFF)", **before},
+                {"구분": "후: +가격 모멘텀 (멀티팩터)", **after},
+            ]), hide_index=True, use_container_width=True)
+
+    # ⑦ 리스크 관리 ---------------------------------------------------------
+    with st.expander("⑦ 리스크 관리:  무방어/손절  →  Ichimoku·ADX 분할 스위칭 + 금헤지(132030)"):
+        st.caption("〔여기에 기술 설명〕 개별 손절은 백테스트에서 알파 마이너스 → 폐기. "
+                   "Ichimoku 구름+ADX 로 주식 100→50→0% 분할, 약세 구간 KODEX 골드(132030).")
+        if st.button("▶ 재현: 방어 OFF vs ON", key="rep_risk"):
+            with st.spinner("백테스트 2회..."):
+                before = _run_bt_metrics((("ichimoku_adx", False),), sy, ey, ver)
+                after = _run_bt_metrics((("ichimoku_adx", True),), sy, ey, ver)
+            st.dataframe(pd.DataFrame([
+                {"구분": "전: 무방어 (Ichimoku/ADX OFF)", **before},
+                {"구분": "후: Ichimoku+ADX 분할 + 금헤지", **after},
+            ]), hide_index=True, use_container_width=True)
+
+    # ⑧ 검증 체계 -----------------------------------------------------------
+    with st.expander("⑧ 검증 체계:  단순 정확도  →  walk-forward · 일별 MDD · 블랙스완 · MC 10,000회"):
+        st.caption("〔여기에 기술 설명〕 look-ahead 차단 walk-forward + 구간 사이 폭락까지 잡는 "
+                   "일별 실측 MDD + 3대 위기 방어율 + 부트스트랩 10,000회 파산확률.")
+        if st.button("▶ 재현: 블랙스완 + 몬테카를로", key="rep_val"):
+            with st.spinner("검증 계산 중..."):
+                try:
+                    data = _compute_validation(ver)
+                except Exception as e:  # noqa: BLE001
+                    st.error(f"재현 실패: {e}"); data = None
+            if data:
+                bs = data["blackswan"].copy()
+                for col in ("sys_mdd", "bench_mdd", "alpha"):
+                    if col in bs:
+                        bs[col] = bs[col].apply(lambda v: f"{v*100:+.2f}%" if pd.notna(v) else "–")
+                st.dataframe(bs, hide_index=True, use_container_width=True)
+                std = data["mc"]["standard"]
+                cc1, cc2 = st.columns(2)
+                cc1.metric("표준 파산확률", f"{std['ruin_1']*100:.2f}%")
+                cc2.metric("CAGR 1% 최악", f"{std['cagr_p1']*100:+.2f}%")
+            elif data is not None:
+                st.warning("백테스트 데이터 부족")
+
+
 def main() -> None:
     st.set_page_config(
         page_title="Stock AI",
@@ -1331,11 +1713,17 @@ def main() -> None:
     st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
 
     st.markdown("# Stock AI")
-    st.caption("한국 주식 추천 시스템 · 실시간(2015-오늘) CAGR 27.4%/Sharpe 1.42/MDD -20.1% · Hybrid LGBM(v3 60% + v4 40%) + Rule (AI 20% 가중) + 2m 리밸 매월 9일 + 비중 캡 25% + 채권 폴백 + Ichimoku+ADX + 금 헤지")
+    st.caption("멀티모달 한국 주식 분석·추천 시스템 · 차트(AI)+펀더멘털+밸류에이션+뉴스+매크로 Late Fusion · "
+               "실시간(2015-오늘) CAGR 27.4%/Sharpe 1.42/MDD -20.1% · Hybrid LGBM(v3 60% + v4 40%) + Rule (AI 20% 가중) "
+               "+ 2m 리밸 매월 9일 + 비중 캡 25% + 채권 폴백 + Ichimoku+ADX + 금 헤지")
 
     cfg = sidebar_settings()
 
-    t1, t2, t3, t4, t5, t6, t7 = st.tabs(["추천", "종목 검색", "포트폴리오", "성과", "검증", "뉴스", "데이터"])
+    t0, t1, t2, t3, t4, t5, t6, t7, t8 = st.tabs(
+        ["🧬 멀티모달", "추천", "종목 검색", "포트폴리오", "성과", "검증",
+         "🔁 재현", "뉴스", "데이터"])
+    with t0:
+        tab_multimodal()
     with t1:
         tab_recommend(cfg)
     with t2:
@@ -1347,8 +1735,10 @@ def main() -> None:
     with t5:
         tab_validation()
     with t6:
-        tab_news()
+        tab_reproduce()
     with t7:
+        tab_news()
+    with t8:
         tab_status()
 
 

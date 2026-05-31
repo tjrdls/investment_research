@@ -132,11 +132,17 @@ class LGBMEnsembleScreener:
         """ticker → (dates np.array, per_inv arr)."""
         if self._per_cache is not None:
             return self._per_cache
-        with sqlite3.connect(DB_PATH) as c:
-            p = pd.read_sql_query(
-                "SELECT ticker AS code, date, per FROM per_history "
-                "WHERE per IS NOT NULL ORDER BY ticker, date",
-                c, parse_dates=["date"])
+        try:
+            with sqlite3.connect(DB_PATH) as c:
+                p = pd.read_sql_query(
+                    "SELECT ticker AS code, date, per FROM per_history "
+                    "WHERE per IS NOT NULL ORDER BY ticker, date",
+                    c, parse_dates=["date"])
+        except (sqlite3.OperationalError, pd.errors.DatabaseError):
+            # per_history 테이블 없음 (예: seed DB) → per_inverse 는 NaN (LightGBM 자동 처리)
+            logger.info("per_history 테이블 없음 → per_inverse 비활성화 (NaN)")
+            self._per_cache = {}
+            return self._per_cache
         if p.empty:
             self._per_cache = {}
             return self._per_cache
@@ -279,6 +285,7 @@ class LGBMEnsembleScreener:
         market_ratio: Optional[str] = None,
         use_ttm_per: bool = True,
         trend_bonus: float = 0.0,
+        use_momentum: bool = True,
     ) -> pd.DataFrame:
         # 1) Rule 후보 풀
         candidates_n = max(top_n * 3, 30)
@@ -289,6 +296,7 @@ class LGBMEnsembleScreener:
             market_cap_percentile=market_cap_percentile,
             trend_bonus=trend_bonus,
             use_ttm_per=use_ttm_per,
+            use_momentum=use_momentum,
         )
         if picks.empty:
             return picks

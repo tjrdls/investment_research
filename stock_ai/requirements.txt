@@ -13,5 +13,11 @@ torch>=2.1
 # 시각화/대시보드
 streamlit>=1.30
 
+# AI 모델 (production 앙상블)
+lightgbm>=4.0
+
+# 멀티모달 분석 (뉴스 감성·밸류에이션·LLM 내러티브) — 키 없으면 미사용
+openai>=1.0
+
 # 옵션 (하이퍼파라미터 튜닝)
 # optuna>=3.4

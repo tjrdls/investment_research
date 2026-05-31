@@ -1285,26 +1285,52 @@ def run_rule_based_backtest(
     use_ttm_per: bool = True,        # 2026-05-16 채택: DART 자체 TTM PER (KRX 갱신지연 우회)
     use_ttm_fundamentals: bool = False,  # ROE/영업이익률/성장률도 자체 TTM 계산
     screener_extra: Optional[dict] = None,  # select_top_n 에 추가 전달 (실험용)
+    ai_weight: Optional[float] = None,       # 설정 시 LGBM v3/v4 Hybrid 앙상블 사용 (None=규칙만)
+    use_momentum: bool = True,               # 12-1개월 가격 모멘텀 팩터 (평균수익 개선)
 ) -> RebalanceResult:
-    """규칙 기반 백테스트 실행 헬퍼."""
-    from src.screener.rule_based import RuleBasedScreener
+    """규칙 기반(또는 ai_weight 지정 시 LGBM Hybrid 앙상블) 백테스트 실행 헬퍼.
 
-    screener = RuleBasedScreener()
+    ai_weight=None  → RuleBasedScreener (규칙 4팩터)
+    ai_weight=0.2   → LGBMEnsembleScreener (ensemble = 0.2×AI + 0.8×Rule, 동봉 v3/v4 모델)
+    """
     extra = screener_extra or {}
 
-    def picker(as_of: str, n: int) -> pd.DataFrame:
-        return screener.select_top_n(
-            as_of=as_of, top_n=n,
-            market_split=market_split,
-            trend_filter=trend_filter,
-            trend_bonus=trend_bonus,
-            market_cap_min=market_cap_min,
-            market_cap_percentile=market_cap_percentile,
-            market_ratio=market_ratio,
-            use_ttm_per=use_ttm_per,
-            use_ttm_fundamentals=use_ttm_fundamentals,
-            **extra,
-        )
+    if ai_weight is not None:
+        from src.recommend.lgbm_ensemble import LGBMEnsembleScreener
+        screener = LGBMEnsembleScreener(ai_weight=ai_weight)
+
+        def picker(as_of: str, n: int) -> pd.DataFrame:
+            # LGBMEnsembleScreener.select_top_n 은 use_ttm_fundamentals 미지원
+            return screener.select_top_n(
+                as_of=as_of, top_n=n,
+                market_split=market_split,
+                trend_filter=trend_filter,
+                trend_bonus=trend_bonus,
+                market_cap_min=market_cap_min,
+                market_cap_percentile=market_cap_percentile,
+                market_ratio=market_ratio,
+                use_ttm_per=use_ttm_per,
+                use_momentum=use_momentum,
+                **extra,
+            )
+    else:
+        from src.screener.rule_based import RuleBasedScreener
+        screener = RuleBasedScreener()
+
+        def picker(as_of: str, n: int) -> pd.DataFrame:
+            return screener.select_top_n(
+                as_of=as_of, top_n=n,
+                market_split=market_split,
+                trend_filter=trend_filter,
+                trend_bonus=trend_bonus,
+                market_cap_min=market_cap_min,
+                market_cap_percentile=market_cap_percentile,
+                market_ratio=market_ratio,
+                use_ttm_per=use_ttm_per,
+                use_ttm_fundamentals=use_ttm_fundamentals,
+                use_momentum=use_momentum,
+                **extra,
+            )
 
     bt = RebalanceBacktest()
     return bt.run(
